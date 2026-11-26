@@ -1,7 +1,6 @@
-/* SHA-256 (FIPS 180-4) for Lean ByteArrays. Plain C, no dependencies beyond lean.h. */
+/* SHA-256 (FIPS 180-4) for Lean ByteArrays. Plain C with no libc headers, so that `leanc` can build it. */
 #include <lean/lean.h>
 #include <stdint.h>
-#include <string.h>
 
 static const uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -41,10 +40,10 @@ static void sha256(const uint8_t * p, size_t n, uint8_t out[32]) {
     for (size_t i = 0; i < full; i++) compress(h, p + 64 * i);
     uint8_t tail[128];
     size_t rest = n - 64 * full;
-    memcpy(tail, p + 64 * full, rest);
+    __builtin_memcpy(tail, p + 64 * full, rest);
     tail[rest] = 0x80;
     size_t padded = rest + 1 + 8 <= 64 ? 64 : 128;
-    memset(tail + rest + 1, 0, padded - rest - 1);
+    __builtin_memset(tail + rest + 1, 0, padded - rest - 1);
     uint64_t bits = (uint64_t)n * 8;
     for (int i = 0; i < 8; i++) tail[padded - 1 - i] = (uint8_t)(bits >> (8 * i));
     compress(h, tail);

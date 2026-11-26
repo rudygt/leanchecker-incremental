@@ -11,7 +11,7 @@ target sha256.o pkg : FilePath := do
   let srcJob ← sha256.c.fetch
   let oFile := pkg.buildDir / "c" / "sha256.o"
   let weakArgs := #["-I", (← getLeanIncludeDir).toString]
-  buildO oFile srcJob weakArgs #["-fPIC", "-O3"] "cc" getLeanTrace
+  buildO oFile srcJob weakArgs #["-fPIC", "-O3"] (← getLeanc) getLeanTrace
 
 target libincsha pkg : FilePath := do
   let o ← sha256.o.fetch
