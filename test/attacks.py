@@ -66,6 +66,25 @@ def main() -> None:
     if poisoned.returncode != 0 or clean.returncode != 1:
         failures += 1
 
+    # Constants that differ only in their names: `bad : a = b` is a copy of `good : a = a`, for two axioms `a b : Nat`,
+    # and `f : A → B` is a copy of `g : A → A`, for two inductive types with the same structure. Key scheme 2 left names
+    # out of the ids, so both reused the verdicts of `good` and `g` and were accepted.
+    toy = ROOT / "test/toy"
+    lake = lambda *a: subprocess.run(["nice", "-n", "19", "lake", *a], cwd=toy, capture_output=True, text=True)
+    built = lake("build", "Collide.Good", "Collide.BadAxiom", "Collide.BadInductive")
+    if built.returncode != 0:
+        raise SystemExit(built.stdout + built.stderr)
+    store = WORK / "collide.bin"
+    good = lake("exe", "leanchecker-inc", "-q", "--no-id-cache", "--store", str(store), "Collide.Good")
+    if good.returncode != 0:
+        failures += 1
+    for module in ["Collide.BadAxiom", "Collide.BadInductive"]:
+        bad = lake("exe", "leanchecker-inc", "-q", "--no-id-cache", "--store", str(store), "--no-record", module)
+        print(f"{module:<22} with the verdicts of Collide.Good: "
+              f"{'accepted' if bad.returncode == 0 else 'rejected'}")
+        if bad.returncode != 1:
+            failures += 1
+
     print("all attack tests behave as documented" if failures == 0 else f"{failures} failures")
     raise SystemExit(1 if failures else 0)
 

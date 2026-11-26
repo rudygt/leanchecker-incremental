@@ -43,8 +43,9 @@ recursion budget (`addDeclCore 0 0`), so the verdict does not depend on how long
   that constant's `ref` id.
 - the names of `d`'s universe parameters.
 
-A `ref` id is the `decl` id, except for a theorem, where it covers only the statement. It is computed the same way,
-recursively, so it covers everything the kernel can read through that constant. Mutually dependent declarations,
+A `ref` id is the constant's name hashed together with its `decl` id, or with only its statement for a theorem. It is
+computed the same way, recursively, so it covers everything the kernel can read through that constant, including
+which constant it is. Mutually dependent declarations,
 including an inductive type with its constructors and recursors, are hashed as one block. Every encoding is tagged
 and length-prefixed.
 
@@ -56,8 +57,16 @@ and length-prefixed.
 | `mdata` annotations | The kernel strips them before it inspects a term. |
 | Names of universe parameters, inside the ids | They are renamed by position, which is a one-to-one renaming of the declared parameters. Repeated names, which the kernel rejects, would break that, so the raw names are added to the key. An undeclared parameter keeps a position of its own and keeps the key distinct. |
 | A theorem's proof, inside its users' ids | The kernel never unfolds a theorem. |
+| The declaration's own name | The verdict on a declaration does not depend on its own name. The names of the constants it refers to are in the key. |
 
-Two of CA's rules would have broken point 3, so this repository changes them (`IncCheck/CA/VENDORED.md`):
+Three of CA's rules would have broken points 2 and 3, so this repository changes them (`IncCheck/CA/VENDORED.md`):
+
+- **References are bound to names.** CA leaves names out on purpose, so that a renamed lemma keeps its id in a
+  registry. But the kernel tells constants apart by name. Two axioms `a b : Nat` have the same content and are still
+  different, and so are two inductive types with the same structure. Without names, `bad : a = b` got the same key as
+  `good : a = a` with the same proof, and `f : A → B := fun x => x` the same key as `g : A → A := fun x => x`. Key
+  scheme 2 accepted both from a store that held the verdicts of `good` and `g`. A review found this on 2026-11-26.
+  Key scheme 3 binds every `ref` id to its name, and `test/attacks.py` keeps both counterexamples as regression tests.
 
 - **Levels are not normalized.** The kernel compares some levels syntactically, for example when it asks whether a
   type is a `Sort 0`. Normalizing would also erase an undeclared parameter, as in `imax w 0`.
@@ -116,8 +125,8 @@ so a wrong grouping makes the check fail rather than pass.
 
 | Test | What it shows |
 |---|---|
-| `test/KeyProps.lean` (`lake exe inc-key-props`) | 11 mutations of real declarations of `Init`. For each one, the keys that change are exactly the ones the reference graph says must change. That is thousands for a definition, a statement, a level or a constructor, every key for a constant the kernel uses by name, only the theorem itself for a proof, and none for binder names or `mdata`. |
-| `test/attacks.py` | Forged `.olean` files: a constant stored under another name, an inductive type missing from its own `all` field, and `False` proved by `True.intro` are all rejected. A poisoned store is trusted, and `--no-store` rejects again. |
+| `test/KeyProps.lean` (`lake exe inc-key-props`) | Two axioms with the same type give `a = a` and `a = b` different keys. 11 mutations of real declarations of `Init`. For each one, the keys that change are exactly the ones the reference graph says must change. That is thousands for a definition, a statement, a level or a constructor, every key for a constant the kernel uses by name, only the theorem itself for a proof, and none for binder names or `mdata`. |
+| `test/attacks.py` | Forged `.olean` files: a constant stored under another name, an inductive type missing from its own `all` field, and `False` proved by `True.intro` are all rejected. So are `bad : a = b` and `f : A → B`, copies of valid declarations about two same-typed axioms and two same-shaped inductive types, checked against the valid ones' verdicts. A poisoned store is trusted, and `--no-store` rejects again. |
 | `test/scenarios.py` | Edits to a small project re-check exactly the affected declarations, with and without the id cache, and a false theorem added with `debug.skipKernelTC` is rejected. |
 | `docs/mathlib-results.md` | Five Mathlib commits, all accepted, with the declarations re-checked matching what changed. |
 

@@ -230,5 +230,22 @@ unsafe def main : IO UInt32 := do
         {must.size} must change\
         {if missing.isEmpty then "" else s!"; NOT changed: {missing.size} ({sample missing})"}\
         {if extra.isEmpty then "" else s!"; changed without cause: {extra.size} ({sample extra})"}"
+    -- Two axioms with the same type differ only in their names, and the kernel tells them apart. So `a = a` and
+    -- `a = b`, with the same proof, must get different keys.
+    let nat := mkConst ``Nat
+    let eq (x y : Name) := mkApp3 (mkConst ``Eq [1]) nat (mkConst x) (mkConst y)
+    let proof := mkApp2 (mkConst ``rfl [1]) nat (mkConst `collideA)
+    let tySame := eq `collideA `collideA
+    let tyOther := eq `collideA `collideB
+    let ax (n : Name) : ConstantInfo :=
+      .axiomInfo { name := n, levelParams := [], type := nat, isUnsafe := false }
+    let th (n : Name) (ty : Expr) : ConstantInfo :=
+      .thmInfo { name := n, levelParams := [], type := ty, value := proof, all := [n] }
+    let extra : Array (Name × ConstantInfo) := #[(`collideA, ax `collideA), (`collideB, ax `collideB),
+      (`collideSame, th `collideSame tySame), (`collideOther, th `collideOther tyOther)]
+    let s ← snapshot (consts ++ extra)
+    let distinct := s.keys[`collideSame]? != s.keys[`collideOther]?
+    unless distinct do failures := failures + 1
+    IO.println s!"{if distinct then "ok  " else "FAIL"} two axioms with the same type: `a = a` and `a = b` get different keys"
     IO.println (if failures == 0 then "all key properties hold" else s!"{failures} failures")
     return if failures == 0 then 0 else 1

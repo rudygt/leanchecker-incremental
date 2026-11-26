@@ -13,7 +13,8 @@ Measured on 2026-11-26 with Lean `v4.37.0-rc1` on a local WSL machine with 15 GB
 
 ## Current version
 
-Key scheme 2. Inductive blocks with a stored verdict are skipped, stored declarations are inserted before the replay,
+Key scheme 2. Scheme 3, which binds references to names, adds one SHA-256 per constant and was not re-measured.
+Inductive blocks with a stored verdict are skipped, stored declarations are inserted before the replay,
 and `.olean` files are hashed in parallel (`-j`, all hardware threads).
 
 | Commit | What the store had seen | Theorems and definitions checked | Inductive blocks checked | Keys | Wall | Peak |

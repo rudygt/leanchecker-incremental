@@ -12,3 +12,7 @@ name = "Bad"
 [[require]]
 name = "leanchecker-incremental"
 path = "../.."
+
+# Built only by test/attacks.py: declarations that differ only in the names of the constants they refer to.
+[[lean_lib]]
+name = "Collide"

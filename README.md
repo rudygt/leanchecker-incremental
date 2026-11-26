@@ -112,13 +112,18 @@ those fixes. It is not stronger in any other way. Like `leanchecker`, it trusts 
 prelude, so for adversarial settings use `lake comparator` or an external checker.
 
 A declaration skips the kernel when its check key is in the store. The key is a SHA-256 over everything the kernel
-reads while checking it: the declaration, the statements of the theorems it uses, the full content of the other
-constants it uses (definitions with their bodies and reducibility hints, inductive types with their constructors and
-recursors), the constants the kernel uses by name, and the Lean commit. So a changed proof re-checks only its own
+reads while checking it: the declaration, the names and statements of the theorems it uses, the names and full
+content of the other constants it uses (definitions with their bodies and reducibility hints, inductive types with
+their constructors and recursors), the constants the kernel uses by name, and the Lean commit. So a changed proof re-checks only its own
 theorem, and a changed definition re-checks everything that can see its body.
 
 The store and the id cache are trusted inputs. Keep them where only this tool writes, and run with `--no-store` from
 time to time. `docs/soundness.md` gives the full argument, what it rests on, and the tests behind it.
+
+Versions up to commit `e177201` (key schemes 1 and 2) left the names of referenced constants out of the keys. Those
+versions accepted a proof of `a = b` for two axioms `a b : Nat` when the store held the verdict of a proof of `a = a`.
+Key scheme 3 fixes it. Stores and id caches written by older versions are ignored, because every key and the cache
+header include the key scheme.
 
 ## Limitations
 
@@ -137,7 +142,9 @@ the store only after the whole replay succeeds.
 
 The keys build on [CA](https://github.com/proofinity-it/CA), which gives every Lean declaration a SHA-256 id derived
 from its content, with each constant it refers to replaced by that constant's own id. This repository vendors CA's
-hashing modules, with two changes that make the ids follow exactly what the kernel reads (`IncCheck/CA/VENDORED.md`).
+hashing modules, with three changes that make the ids follow exactly what the kernel reads (`IncCheck/CA/VENDORED.md`).
+The most important one puts names back: CA leaves them out on purpose, but the kernel tells two same-typed axioms
+apart by name, and an earlier version of this tool could be fooled by that (`docs/soundness.md`).
 
 Hashing every declaration of Mathlib, proofs included, takes about 5 minutes. The id cache avoids most of it. For each
 module it records a SHA-256 of the module's `.olean` files, the ids of its declarations, and the ids of the outside

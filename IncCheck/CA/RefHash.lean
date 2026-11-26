@@ -168,6 +168,14 @@ private def pushNameExact (b : ByteArray) (n : Name) : ByteArray :=
     | .num _ k => pushNat (pushU8 b 1) k
     | .anonymous => b
 
+/-- leanchecker-inc: the bytes of a name-bound `ref` id. The kernel tells constants apart by name: two axioms `a b : Nat`
+are different atoms even though their content is the same. So every `ref` id, which is what other declarations embed,
+covers the constant's name as well as its content. -/
+private def tagNamed : UInt8 := 0xA5
+
+private def namedRef (n : Name) (raw : ByteArray) : ByteArray :=
+  pushNameExact (pushU8 (pushU8 .empty tagNamed) schemeVersion) n ++ raw
+
 private def pushRefEnc (b : ByteArray) : RefEnc → ByteArray
   | .id bytes    => (pushU8 b 0x31) ++ bytes
   | .blockLocal i => pushNat (pushU8 b 0x32) i
@@ -614,7 +622,7 @@ def computeIds (decls : Array (Name × ConstantInfo)) (base : RefTable := {})
           let s ← stmtHash resolve ci
           let tail ← declTail resolve ci
           let d ← (sha ((pushU8 (pushU8 .empty tagDecl) schemeVersion) ++ (pushU8 .empty (kindTag ci)) ++ s ++ tail) : HashM ByteArray)
-          let r := if isProofIrrelevant ci then s else d
+          let r ← sha (namedRef n (if isProofIrrelevant ci then s else d))
           pure (s, d, r)) |>.run { shared := some shared, hasher, withProofs }
       let (s, d, r) := ids
       results := results.insert n {
@@ -705,7 +713,7 @@ def computeIds (decls : Array (Name × ConstantInfo)) (base : RefTable := {})
         let some ci := declMap.get? n | continue
         let (s, _) ← (stmtHash fullResolve ci).run { shared := some shared, hasher, withProofs }
         let d := memberDecl.get! n
-        let r := if isProofIrrelevant ci then s else d
+        let r ← hasher (namedRef n (if isProofIrrelevant ci then s else d))
         results := results.insert n {
           name := n, stmt := s, decl := d, ref := r,
           block := some (blockId, i),

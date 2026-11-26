@@ -25,7 +25,7 @@ def kernelBuiltins : Array Name := #[
   ``Bool.true, ``String.ofList, ``Char, ``Char.ofNat, ``List.cons, ``List.nil,
   ``Quot, ``Quot.mk, ``Quot.lift, ``Quot.ind, `eagerReduce]
 
-def keyScheme : String := "leanchecker-inc/2"
+def keyScheme : String := "leanchecker-inc/3"
 
 private def pushBytes (b bs : ByteArray) : ByteArray := Id.run do
   let mut b := b
