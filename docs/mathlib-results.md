@@ -13,8 +13,31 @@ Measured on 2026-11-26 with Lean `v4.37.0-rc1` on a local WSL machine with 15 GB
 
 ## Current version
 
-Key scheme 2. Scheme 3, which binds references to names, adds one SHA-256 per constant and was not re-measured.
-Inductive blocks with a stored verdict are skipped, stored declarations are inserted before the replay,
+Key scheme 4: the purpose-built hasher (`IncCheck/Hash.lean`), stored verdicts inserted before the replay, inductive
+blocks skipped, and `.olean` files hashed in parallel (`-j`, all hardware threads). Measured on 2026-11-26 and 27 while
+another Lean build ran on the same machine, with a load average of 3 to 4 on 16 hardware threads.
+
+| Commit | What the store had seen | Theorems and definitions checked | Inductive blocks checked | Keys | Wall | Peak |
+|---|---|---:|---:|---:|---:|---:|
+| `c47f9ad9` | nothing | 792,580 | 7,287 | 343 s | 35.1 min | 7.9 GB |
+| `90e6eec9` | `c47f9ad9` | 13,690 | 58 | 26 s | 4.5 min | 8.3 GB |
+| `381d8b16` | up to the previous commit | 3 | 0 | 12.9 s | 26.2 s | 7.5 GB |
+| `81cb93dd` | up to the previous commit | 43 | 0 | 10.9 s | 21.4 s | 7.6 GB |
+| `06d0af0b` | up to the previous commit | 28 | 0 | | 20.8 s | 7.4 GB |
+| `d16077d8` | up to the previous commit | 2 | 0 | 12.8 s | 28.0 s | 7.5 GB |
+
+The four quotient declarations go to the kernel in every run. The kernel accepted every run.
+
+- **The load explains most of the slowdown against the previous version below.** The first run's kernel replay, whose
+  code the new hasher does not touch, took about 1,750 s instead of 1,100 s. Hashing the toy project back to back
+  under the same load took 18.9 to 20.4 s with the new hasher and 22.7 to 23.3 s with the previous one.
+- **A few more declarations are checked than with key scheme 2.** Names are now part of the keys, and renaming a
+  universe parameter re-checks its users.
+- The id cache for Mathlib is 91 MB and the verdict store 26 MB.
+
+## Key scheme 2, without other load
+
+Key scheme 2, built on CA's ids. Inductive blocks with a stored verdict are skipped, stored declarations are inserted before the replay,
 and `.olean` files are hashed in parallel (`-j`, all hardware threads).
 
 | Commit | What the store had seen | Theorems and definitions checked | Inductive blocks checked | Keys | Wall | Peak |

@@ -17,13 +17,15 @@ Mathlib, 823,508 declarations, on one machine (`docs/mathlib-results.md`):
 
 | Mathlib commit | Kernel checks of definitions and theorems | Time |
 |---|---:|---:|
-| `c47f9ad9`, first run, empty store | 792,580 | 23.2 min |
-| `381d8b16`, removes a coercion (Lake rebuilt 3,580 modules) | 2 | 16.7 s |
-| `81cb93dd`, adds a lemma about `WfDvdMonoid` | 27 | 17.4 s |
-| `06d0af0b`, adds a file | 26 | 16.3 s |
-| `d16077d8`, makes an instance global (Lake rebuilt 2,081 modules) | 2 | 16.6 s |
+| `c47f9ad9`, first run, empty store | 792,580 | 35.1 min |
+| `381d8b16`, removes a coercion (Lake rebuilt 3,580 modules) | 3 | 26.2 s |
+| `81cb93dd`, adds a lemma about `WfDvdMonoid` | 43 | 21.4 s |
+| `06d0af0b`, adds a file | 28 | 20.8 s |
+| `d16077d8`, makes an instance global (Lake rebuilt 2,081 modules) | 2 | 28.0 s |
 
-Each commit after the first was checked against the verdicts of the commit before it. The kernel accepted every run.
+Each commit after the first was checked against the verdicts of the commit before it. These runs shared the machine
+with another Lean build. An earlier version, measured without that load, took 23 minutes for the first run and 16 to
+17 seconds per commit. The kernel accepted every run.
 
 ## Use it in a project
 
@@ -126,9 +128,9 @@ header include the key scheme.
 
 ## Limitations
 
-- **The first run costs a full check.** On Mathlib that is about 23 minutes and up to 8 GB of memory. The kernel runs
-  on one thread.
-- **Every run imports everything.** On Mathlib a run with nothing to check still takes about 16 seconds and 7.5 GB,
+- **The first run costs a full check.** On Mathlib that is 23 to 35 minutes, depending on other load, and up to 8 GB
+  of memory. The kernel runs on one thread.
+- **Every run imports everything.** On Mathlib a run with nothing to check still takes 16 to 28 seconds and 7.5 GB,
   mostly to import Mathlib and read and hash its `.olean` files.
 - **It must match the project's Lean version exactly.** It reads `.olean` files and calls Lean's kernel.
 
