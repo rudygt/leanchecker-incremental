@@ -1,10 +1,12 @@
 # leanchecker-incremental
 
+[![test](https://github.com/rudygt/leanchecker-incremental/actions/workflows/test.yml/badge.svg)](https://github.com/rudygt/leanchecker-incremental/actions/workflows/test.yml)
+
 `leanchecker-inc` checks a Lean project with Lean's kernel, the way `leanchecker --fresh` does. It also keeps the
 kernel's past verdicts, and sends a declaration to the kernel only if something the kernel would read while checking
 it has changed since a verdict was recorded.
 
-Status: experimental, and not reviewed by Lean's maintainers. The master branch tracks Lean `v4.37.0-rc1`.
+Status: experimental, and not reviewed by Lean's maintainers. It is tested with Lean `v4.36.0` and `v4.37.0-rc1`.
 
 ## Why
 
@@ -25,7 +27,9 @@ The kernel accepted every run.
 ## Use it in a project
 
 The checker reads `.olean` files, so it must be built with the same Lean version as the project. Add it as a Lake
-dependency, and Lake builds it with the project's toolchain.
+dependency, and Lake builds it with the project's toolchain. CI runs the full test suite on `v4.37.0-rc1` and the
+scenarios on `v4.36.0`. Keys include the Lean commit, so verdicts never carry over from one Lean version to another.
+Before trusting it on a newer Lean, check that the kernel uses no new constants by name (`docs/kernel-builtins.md`).
 
 ```toml
 # lakefile.toml
