@@ -45,11 +45,8 @@ def keyPrefix (hasher : Hasher) (refs : RefTable) : IO ByteArray := do
       | none => b.push 0
   hasher b
 
-/-- The check key of a declaration, or `none` when CA had to hash a reference by name, so the ids are not exact. -/
-def checkKey (hasher : Hasher) (pre : ByteArray) (ids : DeclIds) : IO (Option ByteArray) := do
-  if ids.unresolved.isEmpty then
-    return some (← hasher (pre ++ ids.decl))
-  else
-    return none
+/-- The check key of a declaration with CA `decl` id `decl`. Only call it with exact ids. -/
+def checkKey (hasher : Hasher) (pre decl : ByteArray) : IO ByteArray :=
+  hasher (pre ++ decl)
 
 end IncCheck

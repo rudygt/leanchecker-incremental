@@ -1,6 +1,7 @@
 """Edit the toy project, rebuild it, and check which declarations `leanchecker-inc` sends to the kernel.
 
-Run from anywhere: `python3 test/scenarios.py`. Every build and check runs under `nice -n 19`.
+Run from anywhere: `python3 test/scenarios.py [--id-cache]`. With `--id-cache` every check also reuses CA ids through
+`--id-cache`, so the scenarios cover the cached path. Every build and check runs under `nice -n 19`.
 """
 
 import subprocess
@@ -13,6 +14,8 @@ WORK = ROOT / "test/work"
 BIN = ROOT / ".lake/build/bin/leanchecker-inc"
 STORE = WORK / "scenarios.store"
 LOG = WORK / "checked.txt"
+IDS = WORK / "scenarios.ids"
+USE_ID_CACHE = "--id-cache" in sys.argv
 A, B, BAD = TOY / "Toy/A.lean", TOY / "Toy/B.lean", TOY / "Bad.lean"
 
 BAD_SOURCE = """import Toy
@@ -41,6 +44,8 @@ def check(module: str = "Toy", record: bool = True) -> tuple[int, set[str], str]
     args = ["lake", "env", str(BIN), "--store", str(STORE), "--log-checked", str(LOG), module]
     if not record:
         args.insert(-1, "--no-record")
+    if USE_ID_CACHE:
+        args[-1:-1] = ["--id-cache", str(IDS)]
     LOG.unlink(missing_ok=True)
     p = sh(args)
     names = set(LOG.read_text().split()) if LOG.exists() else set()
@@ -66,6 +71,7 @@ def scenario(title: str) -> None:
 def main() -> None:
     WORK.mkdir(parents=True, exist_ok=True)
     STORE.unlink(missing_ok=True)
+    IDS.unlink(missing_ok=True)
     reset()
     build()
 

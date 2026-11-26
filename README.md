@@ -19,9 +19,11 @@ lake env /path/to/leanchecker-incremental/.lake/build/bin/leanchecker-inc --stor
 | Flag | Effect |
 |---|---|
 | `--store FILE` | Skip the kernel for declarations whose key is in `FILE`. After a run that succeeds completely, append the new verdicts. |
+| `--id-cache FILE` | Reuse the CA ids of modules whose `.olean` files and outside references are unchanged, and rewrite `FILE`. The keys are identical to a run without it. |
 | `--no-record` | Read the store but never write it. |
 | `--log-checked FILE` | Write the names of the axioms, definitions, theorems and opaques the kernel checked. |
 | `--dump-keys FILE` | Write every check key as `name hex` lines. |
+| `--hash-only` | Compute the keys and stop before the replay. |
 | `--pure-sha` | Hash with CA's pure-Lean SHA-256 instead of `c/sha256.c`. The keys are identical. |
 
 The exit code is 0 when the kernel accepts everything, 1 when it rejects something, and 2 for usage errors.
@@ -36,8 +38,19 @@ changes, and stays the same when only a proof the declaration uses changes.
 
 Only axioms, definitions, theorems and opaques can be skipped. The kernel checks inductive types and quotients on every
 run, and the replay compares stored constructors and recursors with the ones the kernel generates. The tool computes
-every key from the declarations it loads. It never reads a key from a build file. The store is the only new input
-the check trusts.
+every key from the declarations it loads. It never reads a key from a build file. The store and the id cache are the
+only new inputs the check trusts. Keep them where only the checker writes, and run a full check without them from
+time to time.
+
+## The id cache
+
+Hashing all of Mathlib, proofs included, takes about 5 minutes. The id cache records, for each module, a SHA-256 of
+its `.olean` files, the CA ids of its constants, and the `ref` ids of the constants in other modules that it refers
+to. A module is reused when its files and those outside ids are unchanged. Modules are visited in the order of the
+references between them, not in import order: constants generated on demand, such as equation lemmas and `match`
+splitters, can be copied into several modules, and the environment can take a copy from a module that comes after one
+that uses it. Modules that refer to each other are hashed together, and each name is hashed once, in the module the
+environment took it from.
 
 ## Tests
 
