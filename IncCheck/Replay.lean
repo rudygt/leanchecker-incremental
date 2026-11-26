@@ -15,7 +15,19 @@ unchecked path. Constructors and recursors are still compared with the ones the 
 
 open Lean Kernel
 
-namespace IncCheck.Replay
+namespace IncCheck
+
+/-- Lean's `Kernel.Environment.add`, which inserts a constant without the kernel, as importing a module does. It is
+private in Lean and exported as `lean_environment_add`. -/
+@[extern "lean_environment_add"]
+opaque kernelAdd (env : Kernel.Environment) (c : ConstantInfo) : Kernel.Environment
+
+/-- An inductive block's verdict key and the recursors that belong to it. -/
+structure InductiveBlock where
+  key : ByteArray
+  recursors : Array Name
+
+namespace Replay
 
 structure Context where
   newConstants : Std.HashMap Name ConstantInfo
@@ -23,6 +35,8 @@ structure Context where
   keys : Std.HashMap Name ByteArray
   /-- Keys of declarations that a complete earlier run of the same kernel accepted. -/
   store : Std.HashSet ByteArray
+  /-- The block of each inductive type whose members all have exact keys. -/
+  blocks : Std.HashMap Name InductiveBlock := {}
 
 structure State where
   env : Kernel.Environment
@@ -34,6 +48,10 @@ structure State where
   checked : Nat := 0
   /-- Declarations added without a check because their key was in the store. -/
   skipped : Nat := 0
+  /-- Inductive blocks added without the kernel because their key was in the store. -/
+  skippedBlocks : Nat := 0
+  /-- Inductive blocks the kernel checked in this run, by the type that started each. -/
+  checkedBlocks : Array Name := #[]
   /-- Keys of declarations the kernel accepted in this run. -/
   accepted : Array ByteArray := #[]
   /-- Axioms, definitions, theorems and opaques the kernel checked in this run. -/
@@ -123,7 +141,23 @@ partial def replayConstant (name : Name) : M Unit := do
             { name := val.name
               type := val.type
               ctors := ctors.map fun ci => { name := ci.name, type := ci.type } }
-          addDecl name (Declaration.inductDecl lparams nparams types false)
+          match (← read).blocks[name]? with
+          | some block =>
+            if (← read).store.contains block.key then
+              -- A complete earlier run of this kernel accepted a block with this exact content, and compared the
+              -- constructors and recursors it generated with these stored ones. Add them as an import would.
+              let mut added : Array ConstantInfo := all.toArray.map .inductInfo
+              for (_, ctors) in ctorInfo do added := added ++ ctors.toArray
+              for r in block.recursors do
+                if let some ci := (← read).newConstants[r]? then added := added.push ci
+              modify fun s => { s with
+                env := added.foldl kernelAdd s.env, skippedBlocks := s.skippedBlocks + 1 }
+            else
+              addDecl name (Declaration.inductDecl lparams nparams types false)
+              modify fun s => { s with accepted := s.accepted.push block.key, checkedBlocks := s.checkedBlocks.push name }
+          | none =>
+            addDecl name (Declaration.inductDecl lparams nparams types false)
+            modify fun s => { s with checkedBlocks := s.checkedBlocks.push name }
           -- The kernel computes the remaining fields (`numIndices`, `isRec`, ...) itself;
           -- the stored values must agree with them.
           for val in all do
@@ -164,7 +198,8 @@ open Replay in
 /-- Replay `newConstants` into `env`. Returns the final state, whose `accepted` keys are valid verdicts only because
 the whole replay, including the constructor and recursor comparison, succeeded. -/
 def replay (newConstants : Std.HashMap Name ConstantInfo) (keys : Std.HashMap Name ByteArray)
-    (store : Std.HashSet ByteArray) (env : Kernel.Environment) : IO State := do
+    (store : Std.HashSet ByteArray) (env : Kernel.Environment) (blocks : Std.HashMap Name InductiveBlock := {}) :
+    IO State := do
   let mut remaining : NameSet := ∅
   for (n, ci) in newConstants.toList do
     -- Constructors and recursors are checked by their own name after replay, so an entry
@@ -174,7 +209,7 @@ def replay (newConstants : Std.HashMap Name ConstantInfo) (keys : Std.HashMap Na
     if !ci.isUnsafe && !ci.isPartial then
       remaining := remaining.insert n
   let (_, s) ← StateRefT'.run (s := { env, remaining }) do
-    ReaderT.run (r := { newConstants, keys, store }) do
+    ReaderT.run (r := { newConstants, keys, store, blocks }) do
       replayConstant ``String.ofList
       replayConstant ``Char.ofNat
       for n in remaining do

@@ -35,7 +35,7 @@ options:
   -h, --help          show this text
 
 diagnostics:
-  --log-checked FILE  write the names of the axioms, definitions, theorems and opaques the kernel checked
+  --log-checked FILE  write the names of the declarations and inductive blocks the kernel checked
   --dump-keys FILE    write every check key as `name hex` lines
   --hash-only         compute the keys and stop before the replay
   --pure-sha          hash with the pure-Lean SHA-256 instead of the C one (same keys, slower)
@@ -120,6 +120,24 @@ unsafe def run (o : Options) : IO Unit := do
     for (n, d) in decls do
       if let some ci := constants[n]? then
         keys := keys.insert n (← checkKey hasher pre d ci.levelParams)
+    -- An inductive block is the types of one `all` list, their constructors, and the recursors generated for them.
+    let mut recursorsOf : Std.HashMap (List Name) (Array Name) := {}
+    for (n, ci) in constants do
+      if let .recInfo v := ci then
+        recursorsOf := recursorsOf.insert v.all ((recursorsOf.getD v.all #[]).push n)
+    let mut blocks : Std.HashMap Name InductiveBlock := {}
+    for (n, ci) in constants do
+      if let .inductInfo v := ci then
+        if v.all.head? == some n then
+          let recursors := recursorsOf.getD v.all #[]
+          let ctors := v.all.foldl (init := []) fun acc t => match constants[t]? with
+            | some (.inductInfo tv) => acc ++ tv.ctors
+            | _ => acc
+          let members := (v.all ++ ctors ++ recursors.toList).toArray
+          if members.all keys.contains then
+            let key ← blockKey hasher (members.map fun m => (m, keys[m]!))
+            for t in v.all do
+              blocks := blocks.insert t { key, recursors }
     let t2 ← IO.monoMsNow
     if inexact > 0 then
       say s!"{fmt inexact} declarations have no exact key and will always be checked"
@@ -135,10 +153,11 @@ unsafe def run (o : Options) : IO Unit := do
       | some p => loadStore p
       | none => pure {}
     say s!"keys computed in {secs (t2 - t1)}, {fmt store.size} stored verdicts, replaying into the kernel"
-    let s ← replay constants keys store (← mkEmptyEnvironment).toKernelEnv
+    let s ← replay constants keys store (← mkEmptyEnvironment).toKernelEnv blocks
     let t3 ← IO.monoMsNow
     if let some p := o.logChecked then
-      IO.FS.writeFile p <| String.join <| (s.checkedNames.toList.map (·.toString ++ "\n")).mergeSort (· ≤ ·)
+      let lines := s.checkedNames.toList.map (·.toString) ++ s.checkedBlocks.toList.map (s!"inductive {·}")
+      IO.FS.writeFile p <| String.join <| (lines.map (· ++ "\n")).mergeSort (· ≤ ·)
     let recorded := o.record && o.store.isSome
     -- Declarations with identical content share a key, so keep each new key once.
     let (newKeys, _) := s.accepted.foldl (init := (#[], store)) fun (acc, seen) k =>
@@ -146,7 +165,9 @@ unsafe def run (o : Options) : IO Unit := do
     if recorded then
       if let some p := o.store then appendStore p newKeys
     IO.println s!"{what}: accepted. The kernel checked {fmt s.checkedNames.size} definitions and theorems and \
-      {fmt (s.checked - s.checkedNames.size)} inductive types, and skipped {fmt s.skipped} with stored verdicts\
+      {fmt s.checkedBlocks.size} inductive blocks \
+      (and {fmt (s.checked - s.checkedNames.size - s.checkedBlocks.size)} quotient declarations), and skipped {fmt s.skipped} declarations and \
+      {fmt s.skippedBlocks} inductive blocks with stored verdicts\
       {if recorded then s!"; {fmt newKeys.size} new verdicts stored" else ""} ({secs (t3 - t0)})."
 
 end IncCheck.Cli

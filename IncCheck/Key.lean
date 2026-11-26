@@ -54,4 +54,12 @@ def checkKey (hasher : Hasher) (pre decl : ByteArray) (levelParams : List Name) 
     b := pushBytes b u.toString.toUTF8
   hasher b
 
+/-- The verdict key of an inductive block: the check keys of its types, constructors and recursors, by name. -/
+def blockKey (hasher : Hasher) (members : Array (Name × ByteArray)) : IO ByteArray := do
+  let sorted := members.qsort fun a b => Name.cmp a.1 b.1 == .lt
+  let mut b := pushBytes .empty s!"{keyScheme} inductive block".toUTF8
+  for (n, key) in sorted do
+    b := pushBytes (pushBytes b n.toString.toUTF8) key
+  hasher b
+
 end IncCheck

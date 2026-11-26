@@ -46,7 +46,8 @@ def check(module: str = "Toy", record: bool = True) -> tuple[int, set[str], str]
     args[-1:-1] = ["--id-cache", str(IDS)] if USE_ID_CACHE else ["--no-id-cache"]
     LOG.unlink(missing_ok=True)
     p = sh(args)
-    names = set(LOG.read_text().split()) if LOG.exists() else set()
+    names = {line for line in LOG.read_text().splitlines() if line and not line.startswith("inductive ")} \
+        if LOG.exists() else set()
     return p.returncode, names, (p.stdout + p.stderr).strip()
 
 
@@ -78,9 +79,10 @@ def main() -> None:
     print(out.splitlines()[0])
     assert code == 0 and len(names) > 60000, out
 
-    scenario("same build again: nothing is re-checked")
+    scenario("same build again: nothing is re-checked, inductive blocks included")
     code, names, out = check()
     assert code == 0 and names == set(), (names, out)
+    assert "and 0 inductive blocks" in out, out
     print("checked: none")
 
     scenario("proof edit that elaborates to the same term up to binder names: nothing is re-checked")

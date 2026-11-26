@@ -60,7 +60,7 @@ rejects something, and 2 for usage errors.
 | `--id-cache FILE` | Use `FILE` as the id cache instead of `.lake/leanchecker-inc/ids.bin`. |
 | `--no-id-cache` | Hash every declaration again. The keys are the same as with the cache. |
 | `-q`, `--quiet` | Print only the result. |
-| `--log-checked FILE` | Write the names of the axioms, definitions, theorems and opaques the kernel checked. |
+| `--log-checked FILE` | Write the names of the declarations the kernel checked, and `inductive T` for each inductive block. |
 | `--dump-keys FILE` | Write every check key as `name hex` lines. |
 | `--hash-only` | Compute the keys and stop before the replay. |
 | `--pure-sha` | Hash with the pure-Lean SHA-256 instead of `c/sha256.c`. The keys are identical. |

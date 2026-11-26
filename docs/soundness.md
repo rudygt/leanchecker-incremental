@@ -68,11 +68,25 @@ Two of CA's rules would have broken point 3, so this repository changes them (`I
 the ones the kernel generates only after everything else. Keys are added to the store only if that comparison passes
 too, so no stored verdict depends on data that the end of the run rejected.
 
+## Inductive blocks
+
+The kernel checks an inductive declaration even on its unchecked path, and generates its constructors and recursors
+itself. So an inductive block has its own verdict key: a SHA-256 over the check keys of its types, their constructors,
+and the recursors whose `all` field names the block's types. The key is recorded after the kernel accepted the block in
+a complete run. That run also compared the constructors and recursors the kernel generated with the stored ones. When
+the key is in the store, the stored types, constructors and recursors are inserted directly, as importing a module
+does, with Lean's `Kernel.Environment.add` (exported as `lean_environment_add`).
+
+The same content gives the same generated constants, because the kernel is deterministic. If the block were missing a
+constant that the kernel would generate, the comparison at the end of the replay would fail with "No such recursor",
+so a wrong grouping makes the check fail rather than pass.
+
 ## What is always checked
 
-- **Inductive types and quotients.** The kernel checks and generates them even on its unchecked path.
+- **Quotients.** `Quot` and its three companions go to the kernel on every run.
 - **Declarations with an inexact id.** These are declarations with a reference that has no id. In practice there are
   none.
+- **Inductive blocks with a member that has no exact id.**
 - **Nothing `unsafe` or `partial`.** Those are skipped entirely, as Lean's `replay` does.
 
 ## The trusted inputs
