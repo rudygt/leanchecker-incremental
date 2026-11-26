@@ -39,7 +39,6 @@ diagnostics:
   --log-checked FILE  write the names of the declarations and inductive blocks the kernel checked
   --dump-keys FILE    write every check key as `name hex` lines
   --hash-only         compute the keys and stop before the replay
-  --pure-sha          hash with the pure-Lean SHA-256 instead of the C one (same keys, slower)
 
 The store and the id cache are trusted: keep them where only this tool writes, and run with --no-store from time
 to time."
@@ -54,7 +53,6 @@ structure Options where
   logChecked : Option FilePath := none
   dumpKeys : Option FilePath := none
   hashOnly : Bool := false
-  pureSha : Bool := false
   /-- Threads for hashing `.olean` files. -/
   threads : Nat := max 1 (System.Platform.Internal.getHardwareConcurrency ()).toNat
 
@@ -70,7 +68,6 @@ def parseArgs : List String → Options → Except String Options
   | "--log-checked" :: p :: rest, o => parseArgs rest { o with logChecked := some p }
   | "--dump-keys" :: p :: rest, o => parseArgs rest { o with dumpKeys := some p }
   | "--hash-only" :: rest, o => parseArgs rest { o with hashOnly := true }
-  | "--pure-sha" :: rest, o => parseArgs rest { o with pureSha := true }
   | "-j" :: k :: rest, o | "--threads" :: k :: rest, o => match k.toNat? with
     | some j => parseArgs rest { o with threads := max 1 j }
     | none => .error s!"-j expects a number, got {k}"
@@ -102,7 +99,6 @@ unsafe def run (o : Options) : IO Unit := do
   initSearchPath (← findSysroot)
   let modules ← if o.modules.isEmpty then pure #[← rootModule] else pure o.modules
   let what := ", ".intercalate (modules.map toString).toList
-  let hasher := if o.pureSha then CA.SHA256.pureHasher else nativeHasher
   say s!"importing {what}"
   let t0 ← IO.monoMsNow
   Lean.withImportModules (modules.map ({ module := · })) {} fun env => do
@@ -113,19 +109,17 @@ unsafe def run (o : Options) : IO Unit := do
     say s!"{fmt constants.size} constants imported in {secs (t1 - t0)}, computing declaration ids"
     let (decls, refs, inexact) ← match o.idCache with
       | some p =>
-        let c ← computeIdsCached env (← loadIdCache p) hasher o.threads
+        let c ← computeIdsCached env (← loadIdCache p) o.threads
         saveIdCache p c.cache
         say s!"ids: {fmt c.reused} modules reused from the id cache, {fmt c.hashed} hashed"
-        pure (c.decls, c.refs, c.inexact)
+        pure (c.decls, c.interfaces, c.inexact)
       | none =>
-        let (ids, refs) ← CA.RefHash.computeIds constants.toArray {} hasher (withProofs := true)
-        let exact := ids.filter (·.unresolved.isEmpty)
-        pure (exact.map fun i => (i.name, i.decl), refs, ids.size - exact.size)
-    let pre ← keyPrefix hasher refs
+        let c ← computeIdsCached env {} o.threads
+        pure (c.decls, c.interfaces, c.inexact)
+    let pre := keyPrefix refs
     let mut keys : Std.HashMap Name ByteArray := {}
     for (n, d) in decls do
-      if let some ci := constants[n]? then
-        keys := keys.insert n (← checkKey hasher pre d ci.levelParams)
+      keys := keys.insert n (checkKey pre d)
     -- An inductive block is the types of one `all` list, their constructors, and the recursors generated for them.
     let mut recursorsOf : Std.HashMap (List Name) (Array Name) := {}
     for (n, ci) in constants do
@@ -141,7 +135,7 @@ unsafe def run (o : Options) : IO Unit := do
             | _ => acc
           let members := (v.all ++ ctors ++ recursors.toList).toArray
           if members.all keys.contains then
-            let key ← blockKey hasher (members.map fun m => (m, keys[m]!))
+            let key := blockKey (members.map fun m => (m, keys[m]!))
             for t in v.all do
               blocks := blocks.insert t { key, recursors }
     let t2 ← IO.monoMsNow

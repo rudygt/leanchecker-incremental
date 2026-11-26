@@ -1,6 +1,6 @@
 """Edit the toy project, rebuild it, and check which declarations `leanchecker-inc` sends to the kernel.
 
-Run from anywhere: `python3 test/scenarios.py [--id-cache]`. With `--id-cache` every check also reuses CA ids through
+Run from anywhere: `python3 test/scenarios.py [--id-cache]`. With `--id-cache` every check also reuses declaration ids through
 `--id-cache`, so the scenarios cover the cached path. Every build and check runs under `nice -n 19`.
 """
 

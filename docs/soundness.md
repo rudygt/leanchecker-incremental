@@ -35,43 +35,48 @@ It never reads the body of a theorem or of an opaque constant. `has_value()` is 
 `src/kernel/declaration.h`, so only definitions are unfolded. The replay calls the kernel with no heartbeat or
 recursion budget (`addDeclCore 0 0`), so the verdict does not depend on how long the check takes.
 
-**2. The key covers all of those inputs.** A check key is the SHA-256 of:
+**2. The key covers all of those inputs.** Every constant has two SHA-256 ids (`IncCheck/Hash.lean`):
 
-- the key scheme and `Lean.githash` of the running binary.
-- the `ref` id of every constant the kernel uses by name.
-- CA's `decl` id of `d`: its kind, type, value and structural fields, hashed with each referenced constant replaced by
-  that constant's `ref` id.
-- the names of `d`'s universe parameters.
+- Its **interface id** covers what a check of another declaration can read through it: its name, kind, universe
+  parameters and type, a definition's body, reducibility hints and safety, and the structure of an inductive type,
+  constructor or recursor. It also covers the interface ids of every constant those name, so it is a Merkle hash over
+  everything reachable through types and definition bodies.
+- Its **declaration id** covers what its own check reads: its interface id, plus a theorem's proof or an opaque
+  constant's body and the interface ids of every constant those name.
 
-A `ref` id is the constant's name hashed together with its `decl` id, or with only its statement for a theorem. It is
-computed the same way, recursively, so it covers everything the kernel can read through that constant, including
-which constant it is. Mutually dependent declarations,
-including an inductive type with its constructors and recursors, are hashed as one block. Every encoding is tagged
-and length-prefixed.
+A check key is the SHA-256 of the key scheme, `Lean.githash` of the running binary, the interface ids of the constants
+the kernel uses by name, and the declaration id.
+
+Expressions are hashed with each constant referred to by name, and the interface ids of those constants are hashed
+alongside. Names matter, because the kernel tells constants apart by name: two axioms `a b : Nat` have the same
+content and are still different. An inductive block (its types, constructors and recursors) and a mutual group of
+definitions are hashed as one unit, because they refer to each other. Every encoding is tagged and length-prefixed, and
+large terms are hashed from the digests of their children, so a proof shared as a DAG costs its size as a DAG.
 
 **3. What the key leaves out, the kernel ignores.**
 
 | Left out of the key | Why the kernel's verdict does not change |
 |---|---|
-| Binder names | The kernel uses de Bruijn indices. Names are only for printing. |
+| Binder names and binder info | The kernel uses de Bruijn indices, and binder info only guides elaboration. |
 | `mdata` annotations | The kernel strips them before it inspects a term. |
-| Names of universe parameters, inside the ids | They are renamed by position, which is a one-to-one renaming of the declared parameters. Repeated names, which the kernel rejects, would break that, so the raw names are added to the key. An undeclared parameter keeps a position of its own and keeps the key distinct. |
-| A theorem's proof, inside its users' ids | The kernel never unfolds a theorem. |
-| The declaration's own name | The verdict on a declaration does not depend on its own name. The names of the constants it refers to are in the key. |
+| The `nondep` flag of `let` | The kernel checks a `let` the same way either way. |
+| A theorem's proof, in its users' keys | The kernel never unfolds a theorem. |
+| An opaque constant's body, in its users' keys | The kernel never unfolds an opaque constant. |
 
-Three of CA's rules would have broken points 2 and 3, so this repository changes them (`IncCheck/CA/VENDORED.md`):
+Universe levels are hashed exactly as written, never normalized: the kernel compares some levels syntactically, for
+example when it asks whether a type is a `Sort 0`, and it rejects an undeclared parameter even inside `imax w 0`.
+Universe parameter names are hashed as written too. Renaming one changes the interface id, so the constant's users are
+checked again, which costs time but is never wrong.
 
-- **References are bound to names.** CA leaves names out on purpose, so that a renamed lemma keeps its id in a
-  registry. But the kernel tells constants apart by name. Two axioms `a b : Nat` have the same content and are still
-  different, and so are two inductive types with the same structure. Without names, `bad : a = b` got the same key as
-  `good : a = a` with the same proof, and `f : A → B := fun x => x` the same key as `g : A → A := fun x => x`. Key
-  scheme 2 accepted both from a store that held the verdicts of `good` and `g`. A review found this on 2026-11-26.
-  Key scheme 3 binds every `ref` id to its name, and `test/attacks.py` keeps both counterexamples as regression tests.
+### Why names are in the key
 
-- **Levels are not normalized.** The kernel compares some levels syntactically, for example when it asks whether a
-  type is a `Sort 0`. Normalizing would also erase an undeclared parameter, as in `imax w 0`.
-- **Reducibility hints are part of a definition's id.** They decide which side the kernel unfolds first, and that can
-  change whether a check succeeds.
+Up to commit `b568494` the keys were built on [CA](https://github.com/proofinity-it/CA), which leaves names out of its
+ids on purpose, so that a renamed lemma keeps its id in a registry. Key schemes 1 and 2 inherited that, and a review on
+2026-11-26 found the consequence: `bad : a = b` got the same key as `good : a = a` with the same proof, for two axioms
+`a b : Nat`, and `f : A → B := fun x => x` the same key as `g : A → A := fun x => x`, for two inductive types with the
+same structure. Those versions accepted both forged declarations from a store that held the verdicts of `good` and
+`g`. Key scheme 3 bound CA's ids to names, and scheme 4 replaced CA with the hasher described here, which refers to
+constants by name throughout. `test/attacks.py` keeps both counterexamples as regression tests.
 
 **4. Verdicts are recorded only after a complete run.** The replay compares the stored constructors and recursors with
 the ones the kernel generates only after everything else. Keys are added to the store only if that comparison passes

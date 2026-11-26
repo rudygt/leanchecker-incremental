@@ -17,8 +17,7 @@ target libincsha pkg : FilePath := do
   let o ← sha256.o.fetch
   buildStaticLib (pkg.staticLibDir / nameToStaticLib "incsha") #[o]
 
-/-- The checker, including the content-addressing modules vendored from CA under `IncCheck.CA`
-(see `IncCheck/CA/VENDORED.md`). -/
+/-- The checker. -/
 lean_lib IncCheck where
   globs := #[.submodules `IncCheck]
   moreLinkObjs := #[libincsha]

@@ -1,26 +1,25 @@
-import IncCheck.CA.RefHash
-import IncCheck.Sha256
 import IncCheck.Key
 
 /-!
-# Per-module cache of CA ids
+# Per-module cache of declaration ids
 
 Hashing every constant of Mathlib, proofs included, takes about 5 minutes. Between two commits almost every module's
-`.olean` files are byte-identical, and a module's ids depend only on its own content and on the `ref` ids of the
+`.olean` files are byte-identical, and a module's ids depend only on its own content and on the interface ids of the
 constants it refers to in other modules. So for each module the cache records:
 
 * a digest of its `.olean`, `.olean.server` and `.olean.private` files,
-* the constants in other modules that it refers to, and a digest of their `ref` ids as seen when its ids were computed,
-* the `decl` and `ref` id of each of its constants.
+* the constants in other modules that it refers to, and a digest of their interface ids as seen when its ids were
+  computed,
+* the declaration and interface id of each of its constants.
 
 A module is reused when its digest and the digest of those outside ids are unchanged. The cache is a trusted input,
 like the verdict store.
 
 On disk, every name is stored once, as the index of its prefix and one component, and modules refer to names by index.
-A `ref` id is stored only when it differs from the `decl` id, which happens only for theorems.
+An interface id is stored only when it differs from the declaration id.
 -/
 
-open Lean CA.RefHash
+open Lean
 
 namespace IncCheck
 
@@ -28,15 +27,15 @@ structure ModEntry where
   digest : ByteArray
   /-- The constants in other modules that this module's constants refer to. -/
   extRefs : Array Name
-  /-- SHA-256 over the `ref` ids of `extRefs`, in order. -/
+  /-- SHA-256 over the interface ids of `extRefs`, in order. -/
   extDigest : ByteArray
-  /-- `(name, decl, ref)` for each constant of the module. -/
+  /-- `(name, declaration id, interface id)` for each constant of the module. -/
   ids : Array (Name × ByteArray × ByteArray)
   deriving Inhabited
 
 abbrev IdCache := Std.HashMap Name ModEntry
 
-/-- The digest of the `ref` ids of `names`, or `none` if one of them has no id. -/
+/-- The digest of the interface ids of `names`, or `none` if one of them has no id. -/
 def extDigestOf (lookup : Name → Option ByteArray) (names : Array Name) : Option ByteArray := Id.run do
   let mut b := ByteArray.empty
   for n in names do
@@ -61,9 +60,6 @@ partial def NameTable.intern (t : NameTable) (n : Name) : NameTable × Nat :=
       | .anonymous => t
     let i := t.names.size
     ({ index := t.index.insert n i, names := t.names.push n }, i)
-
-private def pushU32 (b : ByteArray) (n : Nat) : ByteArray :=
-  (((b.push n.toUInt8).push (n >>> 8).toUInt8).push (n >>> 16).toUInt8).push (n >>> 24).toUInt8
 
 /-- Ties a cache file to the id rules of `keyScheme` and to this format. -/
 def magic : ByteArray := s!"{keyScheme} ids, format 2\n".toUTF8
@@ -189,22 +185,22 @@ def moduleDigests (mods : Array Name) (threads : Nat) : IO (Array ByteArray) := 
   return all
 
 structure CachedIds where
-  /-- `(name, decl id)` for every constant whose ids are exact. -/
+  /-- `(name, declaration id)` for every constant whose ids are exact. -/
   decls : Array (Name × ByteArray)
-  refs : RefTable
+  /-- The interface id of every constant whose ids are exact. -/
+  interfaces : Std.HashMap Name ByteArray
   cache : IdCache
   reused : Nat
   hashed : Nat
   inexact : Nat
 
-/-- CA ids of every imported constant, reusing the ids of modules that `old` shows unchanged.
+/-- The ids of every imported constant, reusing the ids of modules that `old` shows unchanged.
 
 Modules are hashed in the order of the references between them, not in import order: a constant generated on demand
 (an equation lemma, a `match` splitter) can be copied into several modules, and the environment takes it from one of
 them, which can come after a module that uses it. Modules that reference each other are hashed together. Every name is
 hashed once, in the module the environment took it from. -/
-def computeIdsCached (env : Environment) (old : IdCache) (hasher : CA.SHA256.Hasher) (threads : Nat := 1) :
-    IO CachedIds := do
+def computeIdsCached (env : Environment) (old : IdCache) (threads : Nat := 1) : IO CachedIds := do
   let n := env.header.moduleNames.size
   let allDigests ← moduleDigests env.header.moduleNames threads
   let owner (c : Name) : Option Name := (env.getModuleIdxFor? c).map fun j => env.header.moduleNames[j.toNat]!
@@ -227,13 +223,13 @@ def computeIdsCached (env : Environment) (old : IdCache) (hasher : CA.SHA256.Has
     | none => pure ()
     let mut refs : NameSet := {}
     for (_, ci) in infos do
-      for r in refsOf ci (withProofs := true) do
+      for r in ownRefs ci do
         if owner r != some mod then refs := refs.insert r
     ext := ext.insert mod refs.toArray
   let succ (m : Name) : Array Name :=
     (ext.getD m #[]).filterMap owner |>.filter (· != m)
   let comps := sccs env.header.moduleNames succ
-  let mut table : RefTable := {}
+  let mut table : Std.HashMap Name ByteArray := {}
   let mut decls : Array (Name × ByteArray) := #[]
   let mut cache : IdCache := {}
   let mut reused := 0
@@ -259,25 +255,18 @@ def computeIdsCached (env : Environment) (old : IdCache) (hasher : CA.SHA256.Has
       reused := reused + comp.size
       continue
     let infos := comp.foldl (fun acc m => acc ++ owned.getD m #[]) #[]
-    let (ids, table') ← computeIds infos table hasher (withProofs := true)
+    let (ids, table', missing) := hashGroup infos table env.find?
     table := table'
     hashed := hashed + comp.size
-    let mut exact := true
-    for i in ids do
-      if i.unresolved.isEmpty then
-        decls := decls.push (i.name, i.decl)
-      else
-        exact := false
-        inexact := inexact + 1
-        if (← IO.getEnv "INCCHECK_DEBUG").isSome then
-          IO.eprintln s!"inexact {i.name}: {i.unresolved.toList}"
-    if exact then
-      let idsOf : Std.HashMap Name DeclIds := ids.foldl (fun s i => s.insert i.name i) {}
+    inexact := inexact + missing
+    for (c, _) in infos do
+      if let some i := ids[c]? then decls := decls.push (c, i.decl)
+    if missing == 0 then
       for m in comp do
         let extRefs := ext.getD m #[]
-        let mine := (owned.getD m #[]).filterMap fun (c, _) => idsOf[c]?.map fun i => (c, i.decl, i.ref)
+        let mine := (owned.getD m #[]).filterMap fun (c, _) => ids[c]?.map fun i => (c, i.decl, i.interface)
         if let some extDigest := extDigestOf (table[·]?) extRefs then
           cache := cache.insert m { digest := digests[m]!, extRefs, extDigest, ids := mine }
-  return { decls, refs := table, cache, reused, hashed, inexact }
+  return { decls, interfaces := table, cache, reused, hashed, inexact }
 
 end IncCheck

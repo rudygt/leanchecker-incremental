@@ -65,7 +65,6 @@ rejects something, and 2 for usage errors.
 | `--log-checked FILE` | Write the names of the declarations the kernel checked, and `inductive T` for each inductive block. |
 | `--dump-keys FILE` | Write every check key as `name hex` lines. |
 | `--hash-only` | Compute the keys and stop before the replay. |
-| `--pure-sha` | Hash with the pure-Lean SHA-256 instead of `c/sha256.c`. The keys are identical. |
 
 ## Use it in CI
 
@@ -140,11 +139,12 @@ and inductive block whose key is in the store into an empty kernel environment, 
 the rest with the replay code of Lean's `leanchecker`, which sends each one to the kernel. The new keys are added to
 the store only after the whole replay succeeds.
 
-The keys build on [CA](https://github.com/proofinity-it/CA), which gives every Lean declaration a SHA-256 id derived
-from its content, with each constant it refers to replaced by that constant's own id. This repository vendors CA's
-hashing modules, with three changes that make the ids follow exactly what the kernel reads (`IncCheck/CA/VENDORED.md`).
-The most important one puts names back: CA leaves them out on purpose, but the kernel tells two same-typed axioms
-apart by name, and an earlier version of this tool could be fooled by that (`docs/soundness.md`).
+The keys come from `IncCheck/Hash.lean`. Every constant gets an interface id, which covers what other declarations
+can see through it (its type, a definition's body, an inductive type's structure, and the interface ids of everything
+those name), and a declaration id, which adds what only its own check reads, such as a theorem's proof. Expressions are
+hashed with constants referred to by name, because the kernel tells constants apart by name. An earlier version built
+on [CA](https://github.com/proofinity-it/CA), whose ids leave names out on purpose, and could be fooled by that
+(`docs/soundness.md`).
 
 Hashing every declaration of Mathlib, proofs included, takes about 5 minutes. The id cache avoids most of it. For each
 module it records a SHA-256 of the module's `.olean` files, the ids of its declarations, and the ids of the outside
@@ -177,6 +177,7 @@ cache on top of an existing Mathlib build, and run the checker on them. Set `INC
 
 Apache License 2.0, see `LICENSE` and `NOTICE`.
 
-- `IncCheck/CA/` is vendored from [proofinity-it/CA](https://github.com/proofinity-it/CA) (Apache-2.0).
+- The idea of Merkle ids over Lean declarations comes from [CA](https://github.com/proofinity-it/CA). Versions up to
+  `b568494` vendored its hashing modules. No CA code remains.
 - `IncCheck/Replay.lean` is adapted from `src/Lean/Replay.lean` in [Lean 4](https://github.com/leanprover/lean4)
   (Apache-2.0).

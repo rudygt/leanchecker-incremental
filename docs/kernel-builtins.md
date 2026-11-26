@@ -16,6 +16,6 @@ must cover them, or a change to one could go unnoticed. Read from `lean4-snap` a
 `Lean.Kernel.Environment.replay` already replays `String.ofList` and `Char.ofNat` first for the same reason
 (`src/Lean/Replay.lean`).
 
-The check key mixes in the `ref` id of the constant bound to each name, or a marker if the name is absent. All of these
+The check key mixes in the interface id of the constant bound to each name, or a marker if the name is absent. All of these
 live in `Init`, which no project can redefine, so this adds no invalidation in practice. A toolchain change that alters
 one of them changes every key, which is the intended behavior.

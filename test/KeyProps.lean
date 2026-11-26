@@ -1,73 +1,107 @@
 import IncCheck.Key
-import IncCheck.Sha256
-import IncCheck.CA.RefHash
 
 /-!
 # Mutation tests for check keys
 
-Each test changes one thing about one real declaration of `Init`, recomputes every key, and compares the set of keys
-that changed with the set that must change. That set is computed from the reference graph alone, independently of the
-hashes:
+First, the C SHA-256 is checked against standard test vectors, including the padding boundaries.
+
+Then each test changes one thing about one real declaration of `Init`, recomputes every key, and compares the set of
+keys that changed with the set that must change. That set is computed from the reference graph alone, independently of
+the hashes:
 
 * the mutated declaration, if the change is visible to its own kernel check;
-* if the change is visible to the declaration's users (anything but a theorem's proof), every declaration whose type,
-  definition body or structure refers to it, transitively;
-* every declaration whose kernel check reads one of those, its proof included;
-* the whole mutually dependent block of each of these, since a block is hashed as one unit;
+* if the change is visible to other declarations (anything but a theorem's proof or an opaque body), the declaration's
+  whole unit (its inductive block or mutual group), and every declaration whose type, definition body or structure
+  names an affected constant, transitively, with their units;
+* every declaration whose own kernel check reads an affected constant, its proof included;
 * every key, if a constant the kernel uses by name is affected.
 
 A test fails if a key that must change does not (a soundness bug) or if any other key changes (lost reuse).
 -/
 
-open Lean IncCheck CA.RefHash
+open Lean IncCheck
+
+def hex (b : ByteArray) : String :=
+  b.foldl (fun s x => s.push "0123456789abcdef".toList[(x / 16).toNat]! |>.push "0123456789abcdef".toList[(x % 16).toNat]!) ""
+
+def shaVectors : List (String × ByteArray × String) :=
+  let a (k : Nat) : ByteArray := ⟨Array.replicate k 97⟩
+  [("empty", .empty, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+   ("abc", "abc".toUTF8, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+   ("56 bytes", "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq".toUTF8,
+     "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"),
+   ("55 × a", a 55, "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"),
+   ("64 × a", a 64, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"),
+   ("65 × a", a 65, "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0"),
+   ("119 × a", a 119, "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb"),
+   ("1,000,000 × a", a 1000000, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")]
 
 structure Snapshot where
   keys : Std.HashMap Name ByteArray
 
-def snapshot (consts : Array (Name × ConstantInfo)) : IO Snapshot := do
-  let (ids, refs) ← computeIds consts {} nativeHasher (withProofs := true)
-  let pre ← keyPrefix nativeHasher refs
+def snapshot (consts : Array (Name × ConstantInfo)) : Snapshot :=
   let info : Std.HashMap Name ConstantInfo := consts.foldl (fun m (n, c) => m.insert n c) {}
-  let mut keys : Std.HashMap Name ByteArray := {}
-  for i in ids do
-    if i.unresolved.isEmpty then
-      keys := keys.insert i.name (← checkKey nativeHasher pre i.decl info[i.name]!.levelParams)
-  return { keys }
+  let (ids, interfaces, _) := hashGroup consts {} (info[·]?)
+  let pre := keyPrefix interfaces
+  { keys := ids.fold (fun m n i => m.insert n (checkKey pre i.decl)) {} }
+
+/-- What other declarations can observe through `c`: everything but a theorem's proof or an opaque body. -/
+def visibleRefs (c : ConstantInfo) : Array Name :=
+  let more : Array Name := match c with
+    | .defnInfo v => v.value.getUsedConstants ++ v.all.toArray
+    | .thmInfo v => v.all.toArray
+    | .opaqueInfo v => v.all.toArray
+    | .inductInfo v => (v.all ++ v.ctors).toArray
+    | .ctorInfo v => #[v.induct]
+    | .recInfo v => v.rules.toArray.foldl (fun acc r => acc.push r.ctor ++ r.rhs.getUsedConstants) v.all.toArray
+    | _ => #[]
+  (c.type.getUsedConstants ++ more).filter (· != c.name)
+
+/-- Everything `c`'s own kernel check reads. -/
+def readRefs (c : ConstantInfo) : Array Name :=
+  visibleRefs c ++ match c with
+    | .thmInfo v => v.value.getUsedConstants
+    | .opaqueInfo v => v.value.getUsedConstants
+    | _ => #[]
 
 /-- The graph facts the expected sets are computed from. -/
 structure Graph where
   names : Array Name
-  /-- What a user of a constant can observe through it: everything but a theorem's proof. -/
-  iface : Array (Name × Array Name)
-  /-- Everything a constant's own kernel check reads. -/
-  own : Array (Name × Array Name)
-  block : Std.HashMap Name Nat
-  blocks : Array (Array Name)
+  visible : Array (Name × Array Name)
+  reads : Array (Name × Array Name)
+  unitOf : Std.HashMap Name Name
+  members : Std.HashMap Name (Array Name)
 
 def graph (consts : Array (Name × ConstantInfo)) : Graph := Id.run do
-  let own := consts.map fun (n, c) => (n, (refsOf c (withProofs := true)).toArray)
-  let iface := consts.map fun (n, c) => (n, (refsOf c (withProofs := false)).toArray)
-  let ownMap : Std.HashMap Name (Array Name) := own.foldl (fun m (n, rs) => m.insert n rs) {}
-  let names := consts.map (·.1)
-  let blocks := sccs names (fun n => ownMap.getD n #[])
-  let mut block : Std.HashMap Name Nat := {}
-  for h : i in [0:blocks.size] do
-    for n in blocks[i] do
-      block := block.insert n i
-  return { names, iface, own, block, blocks }
+  let info : Std.HashMap Name ConstantInfo := consts.foldl (fun m (n, c) => m.insert n c) {}
+  -- An inductive block (types, constructors, recursors) or a mutual group is one unit, named by its first member.
+  let unitName (c : ConstantInfo) : Name := match c with
+    | .inductInfo v => v.all.headD c.name
+    | .ctorInfo v => match info[v.induct]? with
+      | some (.inductInfo iv) => iv.all.headD v.induct
+      | _ => v.induct
+    | .recInfo v => v.all.headD c.name
+    | .defnInfo v | .thmInfo v | .opaqueInfo v => if v.all.length > 1 then v.all.headD c.name else c.name
+    | _ => c.name
+  let mut unitOf : Std.HashMap Name Name := {}
+  let mut members : Std.HashMap Name (Array Name) := {}
+  for (n, c) in consts do
+    let u := unitName c
+    unitOf := unitOf.insert n u
+    members := members.insert u ((members.getD u #[]).push n)
+  return { names := consts.map (·.1), visible := consts.map fun (n, c) => (n, visibleRefs c)
+           reads := consts.map fun (n, c) => (n, readRefs c), unitOf, members }
 
 def Graph.expand (g : Graph) (s : NameSet) : NameSet :=
-  s.foldl (fun acc n => match g.block[n]? with
-    | some i => g.blocks[i]!.foldl (·.insert ·) acc
-    | none => acc.insert n) {}
+  s.foldl (fun acc n => (g.members.getD (g.unitOf.getD n n) #[n]).foldl (·.insert ·) acc) {}
 
-/-- Everything whose user-visible content depends on `seed`, with whole blocks. -/
+/-- Everything whose user-visible content depends on `seed`, with whole units. -/
 def Graph.affected (g : Graph) (seed : NameSet) : NameSet := Id.run do
   let mut s := g.expand seed
   let mut grew := true
   while grew do
     grew := false
-    for (n, rs) in g.iface do
+    for (n, rs) in g.visible do
       if !s.contains n && rs.any s.contains then
         s := s.insert n
         grew := true
@@ -83,9 +117,9 @@ def Graph.mustChange (g : Graph) (target : Name) (ownVisible usersVisible : Bool
     return g.names.foldl (·.insert ·) {}
   let mut must := affected
   if ownVisible then must := must.insert target
-  for (n, rs) in g.own do
+  for (n, rs) in g.reads do
     if rs.any affected.contains then must := must.insert n
-  return g.expand must
+  return must
 
 /-- A change to one declaration: the new constant, and whether the kernel check of the declaration itself and of its
 users can observe it. -/
@@ -147,7 +181,7 @@ def pick (consts : Array (Name × ConstantInfo)) (users : Std.HashMap Name Nat) 
   | none => throw <| .userError "no declaration fits the mutation"
 
 def mutations (consts : Array (Name × ConstantInfo)) (g : Graph) : IO (Array Mutation) := do
-  let users : Std.HashMap Name Nat := g.own.foldl (init := {}) fun m (_, rs) =>
+  let users : Std.HashMap Name Nat := g.reads.foldl (init := {}) fun m (_, rs) =>
     rs.foldl (fun m r => m.insert r (m.getD r 0 + 1)) m
   let pick := pick consts users
   let isDef (c : ConstantInfo) := c matches .defnInfo { safety := .safe, .. }
@@ -182,8 +216,8 @@ def mutations (consts : Array (Name × ConstantInfo)) (g : Graph) : IO (Array Mu
       apply := fun c => setTV c c.type ((value? c).map (.mdata {})) c.levelParams },
     { title := "`max a b` becomes `max b a`", target := maxLevel, ownVisible := true, usersVisible := true
       apply := fun c => setTV c (swapMax c.type) none c.levelParams },
-    { title := "a universe parameter is renamed: only the declaration itself is re-checked", target := oneParam,
-      ownVisible := true, usersVisible := false
+    { title := "a universe parameter is renamed: names are hashed as written, so its users are re-checked too",
+      target := oneParam, ownVisible := true, usersVisible := true
       apply := fun c =>
         let u := c.levelParams.head!
         let r (e : Expr) := e.instantiateLevelParams [u] [.param `renamedUniverse]
@@ -208,18 +242,25 @@ def changedKeys (a b : Snapshot) : NameSet :=
 def sample (s : NameSet) : String := ", ".intercalate (s.toList.take 3 |>.map toString)
 
 unsafe def main : IO UInt32 := do
+  let mut shaFailures := 0
+  for (label, input, expected) in shaVectors do
+    unless hex (sha256Native input) == expected do
+      shaFailures := shaFailures + 1
+      IO.println s!"FAIL SHA-256 of {label}"
+  IO.println s!"{if shaFailures == 0 then "ok  " else "FAIL"} SHA-256 test vectors ({shaVectors.length})"
+  if shaFailures > 0 then return 1
   initSearchPath (← findSysroot)
   withImportModules #[{ module := `Init }] {} fun env => do
     let mut consts : Array (Name × ConstantInfo) := #[]
     for (n, ci) in env.constants.map₁ do
       consts := consts.push (n, ci)
     let g := graph consts
-    let base ← snapshot consts
+    let base := snapshot consts
     IO.println s!"{consts.size} declarations of Init, {base.keys.size} keys"
     let mut failures := 0
     for m in ← mutations consts g do
       let mutated := consts.map fun (n, c) => if n == m.target then (n, m.apply c) else (n, c)
-      let after ← snapshot mutated
+      let after := snapshot mutated
       let changed := changedKeys base after
       let must := g.mustChange m.target m.ownVisible m.usersVisible
       let missing := must.foldl (fun s n => if changed.contains n then s else s.insert n) ({} : NameSet)
@@ -243,7 +284,7 @@ unsafe def main : IO UInt32 := do
       .thmInfo { name := n, levelParams := [], type := ty, value := proof, all := [n] }
     let extra : Array (Name × ConstantInfo) := #[(`collideA, ax `collideA), (`collideB, ax `collideB),
       (`collideSame, th `collideSame tySame), (`collideOther, th `collideOther tyOther)]
-    let s ← snapshot (consts ++ extra)
+    let s := snapshot (consts ++ extra)
     let distinct := s.keys[`collideSame]? != s.keys[`collideOther]?
     unless distinct do failures := failures + 1
     IO.println s!"{if distinct then "ok  " else "FAIL"} two axioms with the same type: `a = a` and `a = b` get different keys"
