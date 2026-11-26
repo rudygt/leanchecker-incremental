@@ -10,11 +10,14 @@ Hashing every constant of Mathlib, proofs included, takes about 5 minutes. Betwe
 constants it refers to in other modules. So for each module the cache records:
 
 * a digest of its `.olean`, `.olean.server` and `.olean.private` files,
-* the `ref` id of every constant in another module that it refers to, as seen when its ids were computed,
+* the constants in other modules that it refers to, and a digest of their `ref` ids as seen when its ids were computed,
 * the `decl` and `ref` id of each of its constants.
 
-A module is reused when its digest and all those outside ids are unchanged. Modules are visited in import order, so the
-outside ids are final when a module is visited. The cache is a trusted input, like the verdict store.
+A module is reused when its digest and the digest of those outside ids are unchanged. The cache is a trusted input,
+like the verdict store.
+
+On disk, every name is stored once, as the index of its prefix and one component, and modules refer to names by index.
+A `ref` id is stored only when it differs from the `decl` id, which happens only for theorems.
 -/
 
 open Lean CA.RefHash
@@ -23,43 +26,73 @@ namespace IncCheck
 
 structure ModEntry where
   digest : ByteArray
-  extRefs : Array (Name × ByteArray)
+  /-- The constants in other modules that this module's constants refer to. -/
+  extRefs : Array Name
+  /-- SHA-256 over the `ref` ids of `extRefs`, in order. -/
+  extDigest : ByteArray
   /-- `(name, decl, ref)` for each constant of the module. -/
   ids : Array (Name × ByteArray × ByteArray)
   deriving Inhabited
 
 abbrev IdCache := Std.HashMap Name ModEntry
 
+/-- The digest of the `ref` ids of `names`, or `none` if one of them has no id. -/
+def extDigestOf (lookup : Name → Option ByteArray) (names : Array Name) : Option ByteArray := Id.run do
+  let mut b := ByteArray.empty
+  for n in names do
+    match lookup n with
+    | some r => b := b ++ r
+    | none => return none
+  return some (sha256Native b)
+
 /-! ## Encoding -/
+
+/-- Gives every name an index, prefixes first, so a name is stored as its prefix's index and one component. -/
+structure NameTable where
+  index : Std.HashMap Name Nat := ({} : Std.HashMap Name Nat).insert .anonymous 0
+  names : Array Name := #[.anonymous]
+
+partial def NameTable.intern (t : NameTable) (n : Name) : NameTable × Nat :=
+  match t.index[n]? with
+  | some i => (t, i)
+  | none =>
+    let t := match n with
+      | .str p _ | .num p _ => (t.intern p).1
+      | .anonymous => t
+    let i := t.names.size
+    ({ index := t.index.insert n i, names := t.names.push n }, i)
 
 private def pushU32 (b : ByteArray) (n : Nat) : ByteArray :=
   (((b.push n.toUInt8).push (n >>> 8).toUInt8).push (n >>> 16).toUInt8).push (n >>> 24).toUInt8
 
-private def pushBytes (b bs : ByteArray) : ByteArray := pushU32 b bs.size ++ bs
-
-/-- Names are encoded by component, so numeric components (as in `_private.M.0.x`) round-trip exactly. -/
-private def pushName (b : ByteArray) (n : Name) : ByteArray :=
-  let cs := n.components
-  cs.foldl (init := pushU32 b cs.length) fun b c =>
-    match c with
-    | .str _ s => pushBytes (b.push 0) s.toUTF8
-    | .num _ k => pushU32 (b.push 1) k
-    | .anonymous => b.push 2
-
-/-- Ties a cache file to the id rules of `keyScheme`, so ids computed under other rules are never reused. -/
-def magic : ByteArray := s!"{keyScheme} ids\n".toUTF8
+/-- Ties a cache file to the id rules of `keyScheme` and to this format. -/
+def magic : ByteArray := s!"{keyScheme} ids, format 2\n".toUTF8
 
 def encode (c : IdCache) : ByteArray := Id.run do
-  let mut b := pushU32 magic c.size
+  let mut t : NameTable := {}
   for (mod, e) in c do
-    b := pushName b mod
-    b := pushBytes b e.digest
+    t := (t.intern mod).1
+    for n in e.extRefs do t := (t.intern n).1
+    for (n, _, _) in e.ids do t := (t.intern n).1
+  let idx (n : Name) : Nat := t.index[n]!
+  let mut b := pushU32 magic (t.names.size - 1)
+  for n in t.names[1:] do
+    match n with
+    | .str p s =>
+      let bs := s.toUTF8
+      b := pushU32 (pushU32 (b.push 0) (idx p)) bs.size ++ bs
+    | .num p k => b := pushU32 (pushU32 (b.push 1) (idx p)) k
+    | .anonymous => pure ()
+  b := pushU32 b c.size
+  for (mod, e) in c do
+    b := pushU32 b (idx mod) ++ e.digest
     b := pushU32 b e.extRefs.size
-    for (n, r) in e.extRefs do
-      b := pushBytes (pushName b n) r
+    for n in e.extRefs do b := pushU32 b (idx n)
+    b := b ++ e.extDigest
     b := pushU32 b e.ids.size
     for (n, d, r) in e.ids do
-      b := pushBytes (pushBytes (pushName b n) d) r
+      b := pushU32 b (idx n) ++ d
+      b := if r == d then b.push 0 else b.push 1 ++ r
   return b
 
 abbrev Reader := StateT Nat (Except String)
@@ -74,38 +107,42 @@ private def readU32 (bs : ByteArray) : Reader Nat := do
   let a ← readU8 bs; let b ← readU8 bs; let c ← readU8 bs; let d ← readU8 bs
   return a.toNat ||| (b.toNat <<< 8) ||| (c.toNat <<< 16) ||| (d.toNat <<< 24)
 
-private def readBytes (bs : ByteArray) : Reader ByteArray := do
-  let n ← readU32 bs
+private def readFixed (bs : ByteArray) (n : Nat) : Reader ByteArray := do
   let i ← get
   unless i + n ≤ bs.size do throw "unexpected end of id cache"
   set (i + n)
   return bs.extract i (i + n)
 
-private def readName (bs : ByteArray) : Reader Name := do
-  let k ← readU32 bs
-  let mut n := Name.anonymous
-  for _ in [0:k] do
-    match ← readU8 bs with
-    | 0 => n := .str n (String.fromUTF8! (← readBytes bs))
-    | 1 => n := .num n (← readU32 bs)
-    | _ => pure ()
-  return n
-
 def decode (bs : ByteArray) : Except String IdCache := do
   unless bs.extract 0 magic.size == magic do throw "not an id cache"
   let go : Reader IdCache := do
-    let mods ← readU32 bs
+    let mut names : Array Name := #[.anonymous]
+    for _ in [0:← readU32 bs] do
+      let tag ← readU8 bs
+      let some p := names[← readU32 bs]? | throw "bad name index in id cache"
+      if tag == 0 then
+        let len ← readU32 bs
+        names := names.push (.str p (String.fromUTF8! (← readFixed bs len)))
+      else
+        names := names.push (.num p (← readU32 bs))
+    let name (i : Nat) : Reader Name := do
+      let some n := names[i]? | throw "bad name index in id cache"
+      return n
     let mut c : IdCache := {}
-    for _ in [0:mods] do
-      let mod ← readName bs
-      let digest ← readBytes bs
+    for _ in [0:← readU32 bs] do
+      let mod ← name (← readU32 bs)
+      let digest ← readFixed bs 32
       let mut extRefs := #[]
       for _ in [0:← readU32 bs] do
-        extRefs := extRefs.push (← readName bs, ← readBytes bs)
+        extRefs := extRefs.push (← name (← readU32 bs))
+      let extDigest ← readFixed bs 32
       let mut ids := #[]
       for _ in [0:← readU32 bs] do
-        ids := ids.push (← readName bs, ← readBytes bs, ← readBytes bs)
-      c := c.insert mod { digest, extRefs, ids }
+        let n ← name (← readU32 bs)
+        let d ← readFixed bs 32
+        let r ← if (← readU8 bs) == 0 then pure d else readFixed bs 32
+        ids := ids.push (n, d, r)
+      c := c.insert mod { digest, extRefs, extDigest, ids }
     return c
   return (← go.run magic.size).1
 
@@ -137,6 +174,20 @@ def moduleDigest (mod : Name) : IO ByteArray := do
       b := b.push 0
   return sha256Native b
 
+/-- The digests of `mods`, hashed by `threads` dedicated tasks over contiguous slices. -/
+def moduleDigests (mods : Array Name) (threads : Nat) : IO (Array ByteArray) := do
+  let threads := max 1 (min threads mods.size)
+  let chunk := (mods.size + threads - 1) / threads
+  let tasks ← (Array.range threads).mapM fun t => IO.asTask (prio := .dedicated) do
+    let mut out := #[]
+    for m in mods[t * chunk : min mods.size ((t + 1) * chunk)] do
+      out := out.push (← moduleDigest m)
+    return out
+  let mut all := #[]
+  for task in tasks do
+    all := all ++ (← IO.ofExcept task.get)
+  return all
+
 structure CachedIds where
   /-- `(name, decl id)` for every constant whose ids are exact. -/
   decls : Array (Name × ByteArray)
@@ -152,8 +203,10 @@ Modules are hashed in the order of the references between them, not in import or
 (an equation lemma, a `match` splitter) can be copied into several modules, and the environment takes it from one of
 them, which can come after a module that uses it. Modules that reference each other are hashed together. Every name is
 hashed once, in the module the environment took it from. -/
-def computeIdsCached (env : Environment) (old : IdCache) (hasher : CA.SHA256.Hasher) : IO CachedIds := do
+def computeIdsCached (env : Environment) (old : IdCache) (hasher : CA.SHA256.Hasher) (threads : Nat := 1) :
+    IO CachedIds := do
   let n := env.header.moduleNames.size
+  let allDigests ← moduleDigests env.header.moduleNames threads
   let owner (c : Name) : Option Name := (env.getModuleIdxFor? c).map fun j => env.header.moduleNames[j.toNat]!
   -- Per module: digest, owned constants, and the outside constants it refers to.
   let mut digests : Std.HashMap Name ByteArray := {}
@@ -161,7 +214,7 @@ def computeIdsCached (env : Environment) (old : IdCache) (hasher : CA.SHA256.Has
   let mut ext : Std.HashMap Name (Array Name) := {}
   for h : idx in [0:n] do
     let mod := env.header.moduleNames[idx]
-    let digest ← moduleDigest mod
+    let digest := allDigests[idx]!
     digests := digests.insert mod digest
     let names := env.header.moduleData[idx]!.constNames.filter fun c => owner c == some mod
     let infos := names.filterMap fun c => (env.find? c).map (c, ·)
@@ -169,7 +222,7 @@ def computeIdsCached (env : Environment) (old : IdCache) (hasher : CA.SHA256.Has
     match old[mod]? with
     | some e =>
       if e.digest == digest then
-        ext := ext.insert mod (e.extRefs.map (·.1))
+        ext := ext.insert mod e.extRefs
         continue
     | none => pure ()
     let mut refs : NameSet := {}
@@ -187,10 +240,14 @@ def computeIdsCached (env : Environment) (old : IdCache) (hasher : CA.SHA256.Has
   let mut hashed := 0
   let mut inexact := 0
   for comp in comps do
-    let inComp (c : Name) : Bool := (owner c).any comp.contains
+    -- Outside references into another module of the same component resolve to that module's cached ids, which are
+    -- valid if every module of the component is unchanged.
+    let compIds : Std.HashMap Name ByteArray := comp.foldl (init := {}) fun s m => match old[m]? with
+      | some e => e.ids.foldl (fun s (c, _, r) => s.insert c r) s
+      | none => s
+    let lookup (r : Name) : Option ByteArray := table[r]? <|> compIds[r]?
     let reusable := comp.all fun m => match old[m]? with
-      | some e => e.digest == digests[m]! &&
-          e.extRefs.all fun (r, id) => inComp r || table[r]? == some id
+      | some e => e.digest == digests[m]! && extDigestOf lookup e.extRefs == some e.extDigest
       | none => false
     if reusable then
       for m in comp do
@@ -217,9 +274,10 @@ def computeIdsCached (env : Environment) (old : IdCache) (hasher : CA.SHA256.Has
     if exact then
       let idsOf : Std.HashMap Name DeclIds := ids.foldl (fun s i => s.insert i.name i) {}
       for m in comp do
-        let extRefs := (ext.getD m #[]).filterMap fun r => table[r]?.map (r, ·)
+        let extRefs := ext.getD m #[]
         let mine := (owned.getD m #[]).filterMap fun (c, _) => idsOf[c]?.map fun i => (c, i.decl, i.ref)
-        cache := cache.insert m { digest := digests[m]!, extRefs, ids := mine }
+        if let some extDigest := extDigestOf (table[·]?) extRefs then
+          cache := cache.insert m { digest := digests[m]!, extRefs, extDigest, ids := mine }
   return { decls, refs := table, cache, reused, hashed, inexact }
 
 end IncCheck

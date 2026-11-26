@@ -13,16 +13,17 @@ Status: experimental, and not reviewed by Lean's maintainers. It is tested with 
 Mathlib re-checks everything with Lean's kernel once a day (`lake env leanchecker --fresh Mathlib`). That run takes
 20 to 29 minutes on GitHub's runners, and Mathlib merges dozens of commits a day, so the check cannot run on every
 commit. Most commits change very few declarations that the kernel can see. These are measured runs over all of
-Mathlib, 823,508 declarations, on one machine, with the previous key scheme (`docs/mathlib-results.md`):
+Mathlib, 823,508 declarations, on one machine (`docs/mathlib-results.md`):
 
 | Mathlib commit | Kernel checks of definitions and theorems | Time |
 |---|---:|---:|
-| First run, empty store | 792,580 | 20.8 min |
-| `3ee314d9`, a coercion attribute removed (Lake rebuilt 3,799 modules) | 0 | 2.1 min |
-| `7dde1da6`, documentation edits (Lake rebuilt 8,368 modules) | 4 | 6.1 min, before the id cache |
-| `90e6eec9`, five commits including a refactor of `Preadditive` | 13,573 | 4.9 min |
+| `c47f9ad9`, first run, empty store | 792,580 | 23.2 min |
+| `381d8b16`, removes a coercion (Lake rebuilt 3,580 modules) | 2 | 16.7 s |
+| `81cb93dd`, adds a lemma about `WfDvdMonoid` | 27 | 17.4 s |
+| `06d0af0b`, adds a file | 26 | 16.3 s |
+| `d16077d8`, makes an instance global (Lake rebuilt 2,081 modules) | 2 | 16.6 s |
 
-The kernel accepted every run.
+Each commit after the first was checked against the verdicts of the commit before it. The kernel accepted every run.
 
 ## Use it in a project
 
@@ -59,6 +60,7 @@ rejects something, and 2 for usage errors.
 | `--no-record` | Read the store but do not add new verdicts. |
 | `--id-cache FILE` | Use `FILE` as the id cache instead of `.lake/leanchecker-inc/ids.bin`. |
 | `--no-id-cache` | Hash every declaration again. The keys are the same as with the cache. |
+| `-j N`, `--threads N` | Read and hash `.olean` files with `N` threads (default: all hardware threads). |
 | `-q`, `--quiet` | Print only the result. |
 | `--log-checked FILE` | Write the names of the declarations the kernel checked, and `inductive T` for each inductive block. |
 | `--dump-keys FILE` | Write every check key as `name hex` lines. |
@@ -120,19 +122,18 @@ time to time. `docs/soundness.md` gives the full argument, what it rests on, and
 
 ## Limitations
 
-- **The first run costs a full check.** On Mathlib that is about 21 minutes and up to 9 GB of memory, one thread.
-- **Every run has a fixed cost.** On Mathlib it is about 2 minutes: importing, reading and hashing about 6 GB of
-  `.olean` files, and re-checking the 7,291 inductive types and quotients, which the kernel checks even when asked
-  not to.
-- **The id cache is large.** For Mathlib it is about 300 MB.
+- **The first run costs a full check.** On Mathlib that is about 23 minutes and up to 8 GB of memory. The kernel runs
+  on one thread.
+- **Every run imports everything.** On Mathlib a run with nothing to check still takes about 16 seconds and 7.5 GB,
+  mostly to import Mathlib and read and hash its `.olean` files.
 - **It must match the project's Lean version exactly.** It reads `.olean` files and calls Lean's kernel.
 
 ## How it works
 
-`leanchecker-inc` imports the modules, computes a check key for every declaration, and replays every declaration into
-an empty kernel environment with the replay code of Lean's `leanchecker`. A definition, theorem, axiom or opaque whose
-key is in the store is added with `addDeclWithoutChecking`. Everything else goes to the kernel. The new keys are added
-to the store only after the whole replay succeeds.
+`leanchecker-inc` imports the modules and computes a check key for every declaration. It inserts every declaration
+and inductive block whose key is in the store into an empty kernel environment, as an import would. Then it replays
+the rest with the replay code of Lean's `leanchecker`, which sends each one to the kernel. The new keys are added to
+the store only after the whole replay succeeds.
 
 The keys build on [CA](https://github.com/proofinity-it/CA), which gives every Lean declaration a SHA-256 id derived
 from its content, with each constant it refers to replaced by that constant's own id. This repository vendors CA's

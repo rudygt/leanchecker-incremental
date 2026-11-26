@@ -31,6 +31,7 @@ options:
   --no-record         read the store but do not add verdicts to it
   --id-cache FILE     cache of declaration ids per module (default: .lake/leanchecker-inc/ids.bin)
   --no-id-cache       hash every declaration again
+  -j, --threads N     threads for reading and hashing .olean files (default: all hardware threads)
   -q, --quiet         print only the result
   -h, --help          show this text
 
@@ -54,6 +55,8 @@ structure Options where
   dumpKeys : Option FilePath := none
   hashOnly : Bool := false
   pureSha : Bool := false
+  /-- Threads for hashing `.olean` files. -/
+  threads : Nat := max 1 (System.Platform.Internal.getHardwareConcurrency ()).toNat
 
 def parseArgs : List String → Options → Except String Options
   | [], o => .ok o
@@ -68,6 +71,9 @@ def parseArgs : List String → Options → Except String Options
   | "--dump-keys" :: p :: rest, o => parseArgs rest { o with dumpKeys := some p }
   | "--hash-only" :: rest, o => parseArgs rest { o with hashOnly := true }
   | "--pure-sha" :: rest, o => parseArgs rest { o with pureSha := true }
+  | "-j" :: k :: rest, o | "--threads" :: k :: rest, o => match k.toNat? with
+    | some j => parseArgs rest { o with threads := max 1 j }
+    | none => .error s!"-j expects a number, got {k}"
   | arg :: rest, o =>
     if arg.startsWith "-" then .error s!"unknown option {arg}"
     else parseArgs rest { o with modules := o.modules.push arg.toName }
@@ -107,7 +113,7 @@ unsafe def run (o : Options) : IO Unit := do
     say s!"{fmt constants.size} constants imported in {secs (t1 - t0)}, computing declaration ids"
     let (decls, refs, inexact) ← match o.idCache with
       | some p =>
-        let c ← computeIdsCached env (← loadIdCache p) hasher
+        let c ← computeIdsCached env (← loadIdCache p) hasher o.threads
         saveIdCache p c.cache
         say s!"ids: {fmt c.reused} modules reused from the id cache, {fmt c.hashed} hashed"
         pure (c.decls, c.refs, c.inexact)

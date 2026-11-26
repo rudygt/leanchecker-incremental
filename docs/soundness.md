@@ -68,6 +68,19 @@ Two of CA's rules would have broken point 3, so this repository changes them (`I
 the ones the kernel generates only after everything else. Keys are added to the store only if that comparison passes
 too, so no stored verdict depends on data that the end of the run rejected.
 
+## The order of the replay
+
+Declarations and inductive blocks with a stored verdict are inserted first, with Lean's `Kernel.Environment.add`, and
+without walking their references. The rest are replayed in dependency order, as Lean's `replay` does, and sent to the
+kernel.
+
+A check must find every constant it can reach in the environment. A changed declaration can refer to an inserted
+definition whose body names a constant that has not been replayed yet, such as `Quot.lift`, or a theorem whose proof
+changed. So before a declaration is checked, the replay also walks through each constant that is already present.
+For each one it makes the constants that its type, its definition body, or its inductive structure names present
+too. Theorem proofs and opaque bodies are not walked, because the kernel never unfolds them. A missing constant would
+make the kernel fail with "unknown constant", which rejects rather than accepts.
+
 ## Inductive blocks
 
 The kernel checks an inductive declaration even on its unchecked path, and generates its constructors and recursors

@@ -52,6 +52,8 @@ structure State where
   skippedBlocks : Nat := 0
   /-- Inductive blocks the kernel checked in this run, by the type that started each. -/
   checkedBlocks : Array Name := #[]
+  /-- Constants already in the environment whose reachable constants have been made present too. -/
+  visited : NameSet := {}
   /-- Keys of declarations the kernel accepted in this run. -/
   accepted : Array ByteArray := #[]
   /-- Axioms, definitions, theorems and opaques the kernel checked in this run. -/
@@ -92,9 +94,30 @@ def addDecl (name : Name) (d : Declaration) : M Unit := do
           | none => s.accepted }
     | .error ex => throwKernelException ex
 
+/-- The constants a kernel check can reach through `ci` once `ci` is in the environment: its type, the body of a
+definition, and the structure of an inductive type, constructor or recursor. Not the proof of a theorem or the body of
+an opaque, which the kernel never unfolds. -/
+def reachableThrough (ci : ConstantInfo) : NameSet :=
+  let s := ci.type.getUsedConstantsAsSet
+  match ci with
+  | .defnInfo v => v.value.getUsedConstantsAsSet.foldl (·.insert ·) s
+  | .inductInfo v => (v.all ++ v.ctors).foldl (·.insert ·) s
+  | .ctorInfo v => s.insert v.induct
+  | .recInfo v => v.rules.foldl (fun s r => r.rhs.getUsedConstantsAsSet.foldl (·.insert ·) (s.insert r.ctor))
+      (v.all.foldl (·.insert ·) s)
+  | _ => s
+
 mutual
 partial def replayConstant (name : Name) : M Unit := do
-  if ← isTodo name then
+  if !(← isTodo name) then
+    -- Already in the environment: inserted with a stored verdict, or replayed earlier. A check that reaches it can
+    -- reach what its type and body name, so make sure those are present too.
+    unless (← get).visited.contains name do
+      modify fun s => { s with visited := s.visited.insert name }
+      if let some ci := (← read).newConstants[name]? then
+        replayConstants (reachableThrough ci)
+  else
+    modify fun s => { s with visited := s.visited.insert name }
     let some ci := (← read).newConstants[name]? | unreachable!
     replayConstants ci.getUsedConstantsAsSet
     if (← get).pending.contains name then
@@ -208,7 +231,35 @@ def replay (newConstants : Std.HashMap Name ConstantInfo) (keys : Std.HashMap Na
       throw <| .userError s!"declaration '{ci.name}' is stored under the name '{n}'"
     if !ci.isUnsafe && !ci.isPartial then
       remaining := remaining.insert n
-  let (_, s) ← StateRefT'.run (s := { env, remaining }) do
+  -- First insert everything with a stored verdict, without walking its references: a stored verdict was recorded with
+  -- the content of everything it refers to, so the order does not matter, and walking every proof term to find its
+  -- references would cost as much as the rest of the run. The usual replay then handles what is left.
+  let mut env := env
+  let mut skipped := 0
+  let mut skippedBlocks := 0
+  for (n, ci) in newConstants do
+    unless remaining.contains n do continue
+    match ci with
+    | .axiomInfo _ | .defnInfo _ | .thmInfo _ | .opaqueInfo _ =>
+      if keys[n]?.any store.contains then
+        env := kernelAdd env ci
+        remaining := remaining.erase n
+        skipped := skipped + 1
+    | .inductInfo v =>
+      let some block := blocks[n]? | continue
+      unless v.all.head? == some n && store.contains block.key do continue
+      let types := v.all.filterMap fun t => newConstants[t]?
+      let ctors := types.foldl (init := []) fun acc c => match c with
+        | .inductInfo tv => acc ++ tv.ctors.filterMap fun c => newConstants[c]?
+        | _ => acc
+      let recursors := block.recursors.toList.filterMap fun r => newConstants[r]?
+      let members := types ++ ctors ++ recursors
+      unless types.length == v.all.length && members.all (remaining.contains ·.name) do continue
+      env := members.foldl kernelAdd env
+      remaining := members.foldl (fun r c => r.erase c.name) remaining
+      skippedBlocks := skippedBlocks + 1
+    | _ => pure ()
+  let (_, s) ← StateRefT'.run (s := { env, remaining, skipped, skippedBlocks }) do
     ReaderT.run (r := { newConstants, keys, store, blocks }) do
       replayConstant ``String.ofList
       replayConstant ``Char.ofNat
