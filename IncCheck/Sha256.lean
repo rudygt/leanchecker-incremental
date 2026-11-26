@@ -1,4 +1,4 @@
-import CA.SHA256
+import IncCheck.CA.SHA256
 
 namespace IncCheck
 

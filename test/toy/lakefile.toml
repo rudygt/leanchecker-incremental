@@ -7,3 +7,8 @@ name = "Toy"
 # Built only by test/scenarios.py, which writes Bad.lean for the scenario that needs it.
 [[lean_lib]]
 name = "Bad"
+
+# The checker under test, used the way a project would: `lake exe leanchecker-inc`.
+[[require]]
+name = "leanchecker-incremental"
+path = "../.."

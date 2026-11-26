@@ -11,7 +11,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TOY = ROOT / "test/toy"
 WORK = ROOT / "test/work"
-BIN = ROOT / ".lake/build/bin/leanchecker-inc"
 STORE = WORK / "scenarios.store"
 LOG = WORK / "checked.txt"
 IDS = WORK / "scenarios.ids"
@@ -41,11 +40,10 @@ def build(target: str = "Toy") -> None:
 
 
 def check(module: str = "Toy", record: bool = True) -> tuple[int, set[str], str]:
-    args = ["lake", "env", str(BIN), "--store", str(STORE), "--log-checked", str(LOG), module]
+    args = ["lake", "exe", "leanchecker-inc", "--store", str(STORE), "--log-checked", str(LOG), module]
     if not record:
         args.insert(-1, "--no-record")
-    if USE_ID_CACHE:
-        args[-1:-1] = ["--id-cache", str(IDS)]
+    args[-1:-1] = ["--id-cache", str(IDS)] if USE_ID_CACHE else ["--no-id-cache"]
     LOG.unlink(missing_ok=True)
     p = sh(args)
     names = set(LOG.read_text().split()) if LOG.exists() else set()

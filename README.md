@@ -8,25 +8,43 @@ Status: experimental. It passes the toy scenarios in `test/scenarios.py`. On Mat
 a commit that changes no declaration the kernel can see takes 2.1 minutes, and the kernel accepted every run
 (`docs/mathlib-results.md`). The constants the kernel uses by name are listed in `docs/kernel-builtins.md`.
 
-## Build and run
+## Use it in a project
 
-The toolchain is Lean `v4.37.0-rc1`.
+The checker reads `.olean` files, so it must be built with the same Lean version as the project. Add it as a Lake
+dependency, and Lake builds it with the project's toolchain. The `master` branch tracks Lean `v4.37.0-rc1`.
 
-```sh
-lake build
-cd path/to/project
-lake env /path/to/leanchecker-incremental/.lake/build/bin/leanchecker-inc --store verdicts.bin MyProject
+```toml
+# lakefile.toml
+[[require]]
+name = "leanchecker-incremental"
+git = "https://github.com/rudygt/leanchecker-incremental"
+rev = "master"
 ```
 
-| Flag | Effect |
+Then build the project and check it:
+
+```sh
+lake update leanchecker-incremental
+lake build
+lake exe leanchecker-inc                 # checks the project's root module
+lake exe leanchecker-inc Mathlib Archive # or the modules you name, together
+```
+
+The first run checks every declaration, like `leanchecker --fresh`. Later runs send only changed declarations to the
+kernel. The verdict store and the id cache live in `.lake/leanchecker-inc/`.
+
+| Option | Effect |
 |---|---|
-| `--store FILE` | Skip the kernel for declarations whose key is in `FILE`. After a run that succeeds completely, append the new verdicts. |
-| `--id-cache FILE` | Reuse the CA ids of modules whose `.olean` files and outside references are unchanged, and rewrite `FILE`. The keys are identical to a run without it. |
-| `--no-record` | Read the store but never write it. |
+| `--store FILE` | Use `FILE` as the verdict store instead of `.lake/leanchecker-inc/verdicts.bin`. |
+| `--no-store` | Check every declaration, and neither read nor write a store. |
+| `--no-record` | Read the store but do not add new verdicts. |
+| `--id-cache FILE` | Use `FILE` as the id cache instead of `.lake/leanchecker-inc/ids.bin`. |
+| `--no-id-cache` | Hash every declaration again. The keys are the same as with the cache. |
+| `-q`, `--quiet` | Print only the result. |
 | `--log-checked FILE` | Write the names of the axioms, definitions, theorems and opaques the kernel checked. |
 | `--dump-keys FILE` | Write every check key as `name hex` lines. |
 | `--hash-only` | Compute the keys and stop before the replay. |
-| `--pure-sha` | Hash with CA's pure-Lean SHA-256 instead of `c/sha256.c`. The keys are identical. |
+| `--pure-sha` | Hash with the pure-Lean SHA-256 instead of `c/sha256.c`. The keys are identical. |
 
 The exit code is 0 when the kernel accepts everything, 1 when it rejects something, and 2 for usage errors.
 
@@ -70,5 +88,5 @@ cache on top of an existing Mathlib build, and run the checker on them. Set `INC
 
 ## Sources
 
-- `CA/` is vendored from [proofinity-it/CA](https://github.com/proofinity-it/CA), Apache-2.0. See `CA/VENDORED.md`.
+- `IncCheck/CA/` is vendored from [proofinity-it/CA](https://github.com/proofinity-it/CA), Apache-2.0. See `IncCheck/CA/VENDORED.md`.
 - `IncCheck/Replay.lean` is adapted from `src/Lean/Replay.lean` in Lean 4, Apache-2.0.

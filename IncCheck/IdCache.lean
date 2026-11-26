@@ -1,4 +1,4 @@
-import CA.RefHash
+import IncCheck.CA.RefHash
 import IncCheck.Sha256
 
 /-!
@@ -114,6 +114,7 @@ def loadIdCache (path : System.FilePath) : IO IdCache := do
   | .error e => throw <| .userError s!"{path}: {e}"
 
 def saveIdCache (path : System.FilePath) (c : IdCache) : IO Unit := do
+  if let some dir := path.parent then IO.FS.createDirAll dir
   let tmp := path.addExtension "tmp"
   IO.FS.writeBinFile tmp (encode c)
   IO.FS.rename tmp path

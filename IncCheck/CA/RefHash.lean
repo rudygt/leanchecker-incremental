@@ -1,8 +1,8 @@
 import Lean
-import CA.Base58
-import CA.Canonical
-import CA.SHA256
-import CA.Util
+import IncCheck.CA.Base58
+import IncCheck.CA.Canonical
+import IncCheck.CA.SHA256
+import IncCheck.CA.Util
 
 /-!
 # CA.RefHash — content identity for declarations (`stmt` / `decl` / `ref`)

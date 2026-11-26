@@ -3,10 +3,6 @@ open System Lake DSL
 
 package «leanchecker-incremental»
 
-/-- The content-addressing modules vendored from CA (see `CA/VENDORED.md`). -/
-lean_lib CA where
-  globs := #[.submodules `CA]
-
 input_file sha256.c where
   path := "c" / "sha256.c"
   text := true
@@ -21,7 +17,10 @@ target libincsha pkg : FilePath := do
   let o ← sha256.o.fetch
   buildStaticLib (pkg.staticLibDir / nameToStaticLib "incsha") #[o]
 
+/-- The checker, including the content-addressing modules vendored from CA under `IncCheck.CA`
+(see `IncCheck/CA/VENDORED.md`). -/
 lean_lib IncCheck where
+  globs := #[.submodules `IncCheck]
   moreLinkObjs := #[libincsha]
 
 @[default_target]
