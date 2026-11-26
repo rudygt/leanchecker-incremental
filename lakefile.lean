@@ -26,3 +26,13 @@ lean_lib IncCheck where
 @[default_target]
 lean_exe «leanchecker-inc» where
   root := `IncCheck.Main
+
+/-- Mutation tests for check keys (`test/KeyProps.lean`). -/
+lean_exe «inc-key-props» where
+  root := `KeyProps
+  srcDir := "test"
+
+/-- Writes forged `.olean` files for `test/attacks.py`. -/
+lean_exe «inc-forge» where
+  root := `Forge
+  srcDir := "test"

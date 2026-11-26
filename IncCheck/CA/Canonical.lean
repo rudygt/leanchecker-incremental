@@ -90,7 +90,9 @@ def buildCanonicalUnivMapping (params : Array Name) : Std.HashMap Name Name := I
     `Level.normalize` orders parameters by `Name.lt`, so the normal form
     would otherwise depend on the original parameter names. -/
 partial def canonicalizeLevel (l : Level) (mapping : Std.HashMap Name Name) : Level :=
-  (go l).normalize
+  -- leanchecker-inc: no `Level.normalize`. The kernel compares some levels syntactically (`Sort 0` for `Prop`), and
+  -- normalizing can erase an undeclared parameter (`imax w 0` becomes `0`) that the kernel rejects.
+  go l
 where
   go : Level → Level
     | .param name => .param (mapping.getD name name)

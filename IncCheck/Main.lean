@@ -118,7 +118,8 @@ unsafe def run (o : Options) : IO Unit := do
     let pre ← keyPrefix hasher refs
     let mut keys : Std.HashMap Name ByteArray := {}
     for (n, d) in decls do
-      keys := keys.insert n (← checkKey hasher pre d)
+      if let some ci := constants[n]? then
+        keys := keys.insert n (← checkKey hasher pre d ci.levelParams)
     let t2 ← IO.monoMsNow
     if inexact > 0 then
       say s!"{fmt inexact} declarations have no exact key and will always be checked"

@@ -421,7 +421,12 @@ private def declTail (resolve : Name → RefEnc) (ci : ConstantInfo) : HashM Byt
     return pushU8 .empty (if v.isUnsafe then 1 else 0)
   | .defnInfo v =>
     let hv ← exprId resolve (canonicalizeL0Decl v.levelParams v.value)
-    return (pushU8 .empty (safetyTag v.safety)) ++ hv
+    -- leanchecker-inc: the reducibility hints steer the kernel's lazy unfolding, so they are part of the id.
+    let hints := match v.hints with
+      | .opaque => pushU8 .empty 0
+      | .abbrev => pushU8 .empty 1
+      | .regular h => pushNat (pushU8 .empty 2) h.toNat
+    return (pushU8 .empty (safetyTag v.safety)) ++ hints ++ hv
   | .thmInfo v =>
     if (← get).withProofs then
       exprId resolve (canonicalizeL0Decl v.levelParams v.value)

@@ -1,5 +1,6 @@
 import IncCheck.CA.RefHash
 import IncCheck.Sha256
+import IncCheck.Key
 
 /-!
 # Per-module cache of CA ids
@@ -45,7 +46,8 @@ private def pushName (b : ByteArray) (n : Name) : ByteArray :=
     | .num _ k => pushU32 (b.push 1) k
     | .anonymous => b.push 2
 
-def magic : ByteArray := "leanchecker-inc ids 1\n".toUTF8
+/-- Ties a cache file to the id rules of `keyScheme`, so ids computed under other rules are never reused. -/
+def magic : ByteArray := s!"{keyScheme} ids\n".toUTF8
 
 def encode (c : IdCache) : ByteArray := Id.run do
   let mut b := pushU32 magic c.size
@@ -107,9 +109,12 @@ def decode (bs : ByteArray) : Except String IdCache := do
     return c
   return (← go.run magic.size).1
 
+/-- The cache at `path`, or an empty one when the file is missing or was written under other id rules. -/
 def loadIdCache (path : System.FilePath) : IO IdCache := do
   unless ← path.pathExists do return {}
-  match decode (← IO.FS.readBinFile path) with
+  let bytes ← IO.FS.readBinFile path
+  unless bytes.extract 0 magic.size == magic do return {}
+  match decode bytes with
   | .ok c => return c
   | .error e => throw <| .userError s!"{path}: {e}"
 

@@ -25,7 +25,7 @@ def kernelBuiltins : Array Name := #[
   ``Bool.true, ``String.ofList, ``Char, ``Char.ofNat, ``List.cons, ``List.nil,
   ``Quot, ``Quot.mk, ``Quot.lift, ``Quot.ind, `eagerReduce]
 
-def keyScheme : String := "leanchecker-inc/1"
+def keyScheme : String := "leanchecker-inc/2"
 
 private def pushBytes (b bs : ByteArray) : ByteArray := Id.run do
   let mut b := b
@@ -45,8 +45,13 @@ def keyPrefix (hasher : Hasher) (refs : RefTable) : IO ByteArray := do
       | none => b.push 0
   hasher b
 
-/-- The check key of a declaration with CA `decl` id `decl`. Only call it with exact ids. -/
-def checkKey (hasher : Hasher) (pre decl : ByteArray) : IO ByteArray :=
-  hasher (pre ++ decl)
+/-- The check key of a declaration with CA `decl` id `decl` and universe parameters `levelParams`. Only call it with
+exact ids. The ids rename universe parameters by position, so the names themselves are added here: the kernel rejects
+a declaration that repeats a name, and positional renaming would hide that. -/
+def checkKey (hasher : Hasher) (pre decl : ByteArray) (levelParams : List Name) : IO ByteArray := do
+  let mut b := pre ++ decl
+  for u in levelParams do
+    b := pushBytes b u.toString.toUTF8
+  hasher b
 
 end IncCheck

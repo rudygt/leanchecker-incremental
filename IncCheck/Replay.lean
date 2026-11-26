@@ -1,5 +1,6 @@
 /-
-Adapted from `src/Lean/Replay.lean` in Lean 4 (Copyright (c) 2023 Kim Morrison, Apache 2.0).
+Adapted from `src/Lean/Replay.lean` in Lean 4 (Copyright (c) 2023 Kim Morrison, Apache 2.0), as of commit e6e25218c
+on master (2026-11-24), which includes the fixes for lean4#16675 (#16677) and malformed inductive entries (#16717).
 -/
 import Lean
 
@@ -99,22 +100,35 @@ partial def replayConstant (name : Name) : M Unit := do
         | .inductInfo info =>
           let lparams := info.levelParams
           let nparams := info.numParams
-          let all ← info.all.mapM fun n => do pure <| ((← read).newConstants[n]!)
+          -- Only the members of `info.all` are sent to the kernel, so `name` must be among them.
+          unless info.all.contains name do
+            throw <| .userError s!"inductive type '{name}' is not listed in its own `all` field"
+          let all ← info.all.mapM fun n => do
+            let some (ConstantInfo.inductInfo val) := (← read).newConstants[n]?
+              | throw <| .userError s!"'{n}', listed in the `all` field of '{name}', is not a stored inductive type"
+            pure val
           for o in all do
             modify fun s =>
               { s with remaining := s.remaining.erase o.name, pending := s.pending.erase o.name }
-          let ctorInfo ← all.mapM fun ci => do
-            pure (ci, ← ci.inductiveVal!.ctors.mapM fun n => do
-              pure ((← read).newConstants[n]!))
-          for (ci, ctors) in ctorInfo do
-            replayConstants ci.getUsedConstantsAsSet
+          let ctorInfo ← all.mapM fun val => do
+            pure (val, ← val.ctors.mapM fun n => do
+              let some ci@(ConstantInfo.ctorInfo _) := (← read).newConstants[n]?
+                | throw <| .userError s!"'{n}', listed as a constructor of '{val.name}', is not a stored constructor"
+              pure ci)
+          for (val, ctors) in ctorInfo do
+            replayConstants (ConstantInfo.inductInfo val).getUsedConstantsAsSet
             for ctor in ctors do
               replayConstants ctor.getUsedConstantsAsSet
-          let types : List InductiveType := ctorInfo.map fun ⟨ci, ctors⟩ =>
-            { name := ci.name
-              type := ci.type
+          let types : List InductiveType := ctorInfo.map fun ⟨val, ctors⟩ =>
+            { name := val.name
+              type := val.type
               ctors := ctors.map fun ci => { name := ci.name, type := ci.type } }
           addDecl name (Declaration.inductDecl lparams nparams types false)
+          -- The kernel computes the remaining fields (`numIndices`, `isRec`, ...) itself;
+          -- the stored values must agree with them.
+          for val in all do
+            unless (← get).env.find? val.name == some (.inductInfo val) do
+              throw <| .userError s!"Invalid inductive type {val.name}"
         | .ctorInfo info =>
           modify fun s => { s with postponedConstructors := s.postponedConstructors.insert info.name }
         | .recInfo info =>
@@ -153,6 +167,10 @@ def replay (newConstants : Std.HashMap Name ConstantInfo) (keys : Std.HashMap Na
     (store : Std.HashSet ByteArray) (env : Kernel.Environment) : IO State := do
   let mut remaining : NameSet := ∅
   for (n, ci) in newConstants.toList do
+    -- Constructors and recursors are checked by their own name after replay, so an entry
+    -- under a different key would otherwise never be checked.
+    unless n == ci.name do
+      throw <| .userError s!"declaration '{ci.name}' is stored under the name '{n}'"
     if !ci.isUnsafe && !ci.isPartial then
       remaining := remaining.insert n
   let (_, s) ← StateRefT'.run (s := { env, remaining }) do
