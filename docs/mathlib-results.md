@@ -1,6 +1,8 @@
 # leanchecker-inc on Mathlib
 
-First results of `leanchecker-inc`, measured on 2026-11-26. Lean `v4.37.0-rc1`,
+First results of `leanchecker-inc`, measured on 2026-11-26. These runs used key scheme 1. Scheme 2 (`docs/soundness.md`) stopped
+normalizing universe levels and added reducibility hints and universe parameter names to the keys. That changes
+which keys match, not how the tool works. The runs have not been repeated under scheme 2. Lean `v4.37.0-rc1`,
 one thread under `nice -n 19`, on the local WSL machine.
 
 ## Setup

@@ -1,0 +1,25 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: lake build leanchecker-inc inc-key-props inc-forge
+      - name: Key mutation tests
+        run: lake exe inc-key-props
+      - name: Forged .olean files and a poisoned store
+        run: python3 test/attacks.py
+      - name: Edits to a small project
+        run: python3 test/scenarios.py
+      - name: Edits to a small project, through the id cache
+        run: python3 test/scenarios.py --id-cache
