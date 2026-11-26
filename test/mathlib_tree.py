@@ -2,7 +2,8 @@
 
 usage: mathlib_tree.py COMMIT
 
-The base is PFR's Mathlib build at `c47f9ad9`, hard-linked into `test/work/tree-<commit>`. Modules whose Mathlib cache
+Set INCCHECK_PFR to a Lake project whose `.lake/packages/mathlib` holds the Mathlib build of `c47f9ad9` (in our runs,
+the PFR project). That build is the base, and it is hard-linked into `test/work/tree-<commit>`. Modules whose Mathlib cache
 key differs at COMMIT are extracted from the cache archives and moved into place by rename, so PFR's files are never
 written. The commit must have the same toolchain, lakefile and dependency manifest as `c47f9ad9` (true for master from
 2026-11-20 to 2026-11-26), so the dependencies' builds in PFR stay valid. Prints the LEAN_PATH to use.
@@ -20,7 +21,7 @@ WORK = ROOT / "test/work"
 CLONE = WORK / "mathlib-src"
 XDG = WORK / "xdg"
 CACHE = XDG / "mathlib"
-PFR = Path("/home/rudy/repos/misc/leanmr/benchmarks/pfr")
+PFR = Path(os.environ["INCCHECK_PFR"])  # a Lake project whose `.lake/packages/mathlib` is the build of `c47f9ad9`
 PFR_MATHLIB = PFR / ".lake/packages/mathlib"
 PFR_LIB = PFR_MATHLIB / ".lake/build/lib/lean"
 BASE = "c47f9ad906c5ec32a953f99911b446cd26dcc123"

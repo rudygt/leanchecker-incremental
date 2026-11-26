@@ -2,9 +2,11 @@
 
 `leanchecker-inc` re-checks a Lean module and everything it imports with Lean's kernel, like `leanchecker --fresh`.
 It also keeps a store of the kernel's past verdicts, and skips the kernel for every declaration whose check key is
-already in it. The plan and the measurements behind it are in LeanMR, under `research/incremental-leanchecker/`.
+already in it.
 
-Status: experimental. It passes the toy scenarios in `test/scenarios.py` and has not run on Mathlib yet.
+Status: experimental. It passes the toy scenarios in `test/scenarios.py`. On Mathlib, after a 20.8-minute first run,
+a commit that changes no declaration the kernel can see takes 2.1 minutes, and the kernel accepted every run
+(`docs/mathlib-results.md`). The constants the kernel uses by name are listed in `docs/kernel-builtins.md`.
 
 ## Build and run
 
@@ -55,12 +57,16 @@ environment took it from.
 ## Tests
 
 ```sh
-python3 test/scenarios.py
+python3 test/scenarios.py            # add --id-cache to run them through the id cache
 ```
 
 The script edits `test/toy`, rebuilds it, and checks which declarations reach the kernel: none after an unchanged
 build, none after a proof edit that only renames binders, one after a real proof change, exactly the dependents after
 a definition change, and a rejection for a false theorem added with `debug.skipKernelTC`.
+
+`test/mathlib_tree.py` and `test/run_commits.sh` rebuild the trees of later Mathlib master commits from Mathlib's
+cache on top of an existing Mathlib build, and run the checker on them. Set `INCCHECK_PFR` to a Lake project whose
+`.lake/packages/mathlib` holds the build of `c47f9ad9`.
 
 ## Sources
 

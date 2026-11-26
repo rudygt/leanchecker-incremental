@@ -17,7 +17,7 @@ open Lean CA.RefHash CA.SHA256
 
 namespace IncCheck
 
-/-- Constants the kernel looks up by name (`research/incremental-leanchecker/kernel-builtins.md` in LeanMR). -/
+/-- Constants the kernel looks up by name (`docs/kernel-builtins.md`). -/
 def kernelBuiltins : Array Name := #[
   ``Nat, ``String, ``Nat.zero, ``Nat.succ,
   ``Nat.add, ``Nat.sub, ``Nat.mul, ``Nat.pow, ``Nat.gcd, ``Nat.div, ``Nat.mod,
