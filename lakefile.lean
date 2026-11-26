@@ -1,0 +1,29 @@
+import Lake
+open System Lake DSL
+
+package «leanchecker-incremental»
+
+/-- The content-addressing modules vendored from CA (see `CA/VENDORED.md`). -/
+lean_lib CA where
+  globs := #[.submodules `CA]
+
+input_file sha256.c where
+  path := "c" / "sha256.c"
+  text := true
+
+target sha256.o pkg : FilePath := do
+  let srcJob ← sha256.c.fetch
+  let oFile := pkg.buildDir / "c" / "sha256.o"
+  let weakArgs := #["-I", (← getLeanIncludeDir).toString]
+  buildO oFile srcJob weakArgs #["-fPIC", "-O3"] "cc" getLeanTrace
+
+target libincsha pkg : FilePath := do
+  let o ← sha256.o.fetch
+  buildStaticLib (pkg.staticLibDir / nameToStaticLib "incsha") #[o]
+
+lean_lib IncCheck where
+  moreLinkObjs := #[libincsha]
+
+@[default_target]
+lean_exe «leanchecker-inc» where
+  root := `IncCheck.Main

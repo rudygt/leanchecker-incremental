@@ -1,0 +1,9 @@
+name = "toy"
+defaultTargets = ["Toy"]
+
+[[lean_lib]]
+name = "Toy"
+
+# Built only by test/scenarios.py, which writes Bad.lean for the scenario that needs it.
+[[lean_lib]]
+name = "Bad"
