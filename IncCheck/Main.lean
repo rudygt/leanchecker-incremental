@@ -32,6 +32,10 @@ options:
   --id-cache FILE     cache of declaration ids per module (default: .lake/leanchecker-inc/ids.bin)
   --no-id-cache       hash every declaration again
   -j, --threads N     threads for reading and hashing .olean files (default: all hardware threads)
+  --shard I/N         check only shard I of N (modules whose import index is I mod N) and assume the rest.
+                      A shard's result means nothing alone: the project is checked once a run without --shard
+                      accepts with all the shards' stores merged. That run still checks declarations whose
+                      check read a proof, which are never stored.
   -q, --quiet         print only the result
   -h, --help          show this text
 
@@ -53,6 +57,8 @@ structure Options where
   logChecked : Option FilePath := none
   dumpKeys : Option FilePath := none
   hashOnly : Bool := false
+  /-- Check only shard `i` of `n`, as `(i, n)`. -/
+  shard : Option (Nat × Nat) := none
   /-- Threads for hashing `.olean` files. -/
   threads : Nat := max 1 (System.Platform.Internal.getHardwareConcurrency ()).toNat
 
@@ -68,6 +74,11 @@ def parseArgs : List String → Options → Except String Options
   | "--log-checked" :: p :: rest, o => parseArgs rest { o with logChecked := some p }
   | "--dump-keys" :: p :: rest, o => parseArgs rest { o with dumpKeys := some p }
   | "--hash-only" :: rest, o => parseArgs rest { o with hashOnly := true }
+  | "--shard" :: s :: rest, o => match (s.splitOn "/").map String.toNat? with
+    | [some i, some n] =>
+      if i < n then parseArgs rest { o with shard := some (i, n) }
+      else .error s!"--shard expects I/N with I < N, got {s}"
+    | _ => .error s!"--shard expects I/N, got {s}"
   | "-j" :: k :: rest, o | "--threads" :: k :: rest, o => match k.toNat? with
     | some j => parseArgs rest { o with threads := max 1 j }
     | none => .error s!"-j expects a number, got {k}"
@@ -116,16 +127,24 @@ unsafe def run (o : Options) : IO Unit := do
       | none =>
         let c ← computeIdsCached env {} o.threads
         pure (c.decls, c.interfaces, c.inexact)
-    let pre := keyPrefix refs
+    let pre? := keyPrefix refs constants.contains (← IO.getEnv "LEAN_NAT_MAX_SIZE")
+    if pre?.isNone then
+      say "a constant the kernel uses by name has no exact id, so every declaration will be checked"
     let mut keys : Std.HashMap Name ByteArray := {}
-    for (n, d) in decls do
-      keys := keys.insert n (checkKey pre d)
+    if let some pre := pre? then
+      for (n, d) in decls do
+        keys := keys.insert n (checkKey pre d)
     -- An inductive block is the types of one `all` list, their constructors, and the recursors generated for them.
     let mut recursorsOf : Std.HashMap (List Name) (Array Name) := {}
     for (n, ci) in constants do
       if let .recInfo v := ci then
         recursorsOf := recursorsOf.insert v.all ((recursorsOf.getD v.all #[]).push n)
+    -- The kernel names the auxiliary types of a nested inductive `_nested.<type>_<i>` while checking it, and rejects
+    -- the block if a constant already has one of those names (`src/kernel/inductive.cpp`). A nested block that skips
+    -- the kernel never meets that check, so it may skip only when no constant is named under `_nested`.
+    let underNested := constants.keys.any (·.getRoot == `_nested)
     let mut blocks : Std.HashMap Name InductiveBlock := {}
+    let mut unskippable : Array Name := #[]
     for (n, ci) in constants do
       if let .inductInfo v := ci then
         if v.all.head? == some n then
@@ -134,13 +153,24 @@ unsafe def run (o : Options) : IO Unit := do
             | some (.inductInfo tv) => acc ++ tv.ctors
             | _ => acc
           let members := (v.all ++ ctors ++ recursors.toList).toArray
-          if members.all keys.contains then
+          let generated := generatedRecursors v
+          let complete := recursors.size == generated.length && generated.all recursors.contains
+          -- The replay never compares an `unsafe` or `partial` constructor or recursor with the one the kernel
+          -- generates, so a block may skip only if every member is safe.
+          let safe := members.all fun m => (constants[m]?).any fun c => !c.isUnsafe && !c.isPartial
+          let eligible := complete && safe && (v.numNested == 0 || !underNested)
+          unless eligible do unskippable := unskippable.push n
+          if eligible && members.all keys.contains then
             let key := blockKey (members.map fun m => (m, keys[m]!))
             for t in v.all do
               blocks := blocks.insert t { key, recursors }
     let t2 ← IO.monoMsNow
     if inexact > 0 then
       say s!"{fmt inexact} declarations have no exact key and will always be checked"
+    unless unskippable.isEmpty do
+      say s!"{fmt unskippable.size} inductive blocks will always be checked: they do not store exactly the recursors \
+        the kernel generates, have an unsafe or partial member, or are nested while a constant is named under `_nested` \
+        ({unskippable.toList.take 3})"
     if let some p := o.dumpKeys then
       let hex (b : ByteArray) : String := b.foldl (fun acc x =>
         let d := "0123456789abcdef".toList
@@ -152,9 +182,32 @@ unsafe def run (o : Options) : IO Unit := do
     let store ← match o.store with
       | some p => loadStore p
       | none => pure {}
+    -- A shard treats the verdicts of the other shards' declarations as stored. A key counts as assumed only if no
+    -- declaration of this shard has it: identical declarations share a key, and each key must be checked somewhere.
+    let (store, assumed) := match o.shard with
+      | none => (store, 0)
+      | some (i, n) =>
+        let inShard (c : Name) : Bool := match env.getModuleIdxFor? c with
+          | some m => m.toNat % n == i
+          | none => i == 0
+        let empty : Std.HashSet ByteArray := {}
+        let mine := keys.fold (init := empty) fun (s : Std.HashSet ByteArray) (c : Name) (k : ByteArray) =>
+          if inShard c then s.insert k else s
+        let mine := blocks.fold (init := mine) fun (s : Std.HashSet ByteArray) (t : Name) (b : InductiveBlock) =>
+          if inShard t then s.insert b.key else s
+        let others := keys.fold (init := empty) fun (s : Std.HashSet ByteArray) (c : Name) (k : ByteArray) =>
+          if inShard c || mine.contains k then s else s.insert k
+        let others := blocks.fold (init := others) fun (s : Std.HashSet ByteArray) (t : Name) (b : InductiveBlock) =>
+          if inShard t || mine.contains b.key then s else s.insert b.key
+        (others.fold (init := store) (·.insert ·), others.size)
+    if let some (i, n) := o.shard then
+      say s!"shard {i}/{n}: assuming {fmt assumed} keys of other shards"
     say s!"keys computed in {secs (t2 - t1)}, {fmt store.size} stored verdicts, replaying into the kernel"
     let s ← replay constants keys store (← mkEmptyEnvironment).toKernelEnv blocks
     let t3 ← IO.monoMsNow
+    unless s.readProofs.isEmpty do
+      say s!"{fmt s.readProofs.size} checks read a theorem's proof, so their verdicts are not stored \
+        ({s.readProofs.toList.take 3})"
     if let some p := o.logChecked then
       let lines := s.checkedNames.toList.map (·.toString) ++ s.checkedBlocks.toList.map (s!"inductive {·}")
       IO.FS.writeFile p <| String.join <| (lines.map (· ++ "\n")).mergeSort (· ≤ ·)

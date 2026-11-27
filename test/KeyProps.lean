@@ -42,7 +42,7 @@ structure Snapshot where
 def snapshot (consts : Array (Name × ConstantInfo)) : Snapshot :=
   let info : Std.HashMap Name ConstantInfo := consts.foldl (fun m (n, c) => m.insert n c) {}
   let (ids, interfaces, _) := hashGroup consts {} (info[·]?)
-  let pre := keyPrefix interfaces
+  let pre := (keyPrefix interfaces info.contains none).get!
   { keys := ids.fold (fun m n i => m.insert n (checkKey pre i.decl)) {} }
 
 /-- What other declarations can observe through `c`: everything but a theorem's proof or an opaque body. -/
@@ -145,6 +145,11 @@ def bumpLits (e : Expr) : Expr :=
 
 def hasLit (e : Expr) : Bool := (e.find? fun s => s.isLit).isSome
 
+def flipNondep (e : Expr) : Expr :=
+  e.replace fun s => match s with
+    | .letE n t v b nd => some (.letE n t v b (!nd))
+    | _ => none
+
 partial def renameBinders (e : Expr) : Expr :=
   match e with
   | .lam _ t b bi => .lam `renamed (renameBinders t) (renameBinders b) bi
@@ -193,6 +198,7 @@ def mutations (consts : Array (Name × ConstantInfo)) (g : Graph) : IO (Array Mu
   let thmTypeLit ← pick fun c => isThm c && hasLit c.type
   let thmBinders ← pick fun c => isThm c && c.type.isForall
   let defAny ← pick isDef
+  let defLet ← pick fun c => isDef c && (value? c).any fun v => (v.find? (·.isLet)).isSome
   let maxLevel ← pick fun c => (isDef c || isThm c) && hasAsymMax c.type
   let oneParam ← pick fun c => isThm c && c.levelParams.length == 1
   let twoParams ← pick fun c => isThm c && c.levelParams.length == 2
@@ -212,8 +218,12 @@ def mutations (consts : Array (Name × ConstantInfo)) (g : Graph) : IO (Array Mu
     { title := "binder names change: no key changes", target := thmBinders, ownVisible := false,
       usersVisible := false
       apply := fun c => setTV c (renameBinders c.type) none c.levelParams },
-    { title := "mdata is added: no key changes", target := defAny, ownVisible := false, usersVisible := false
+    { title := "mdata is added to a definition's body: the kernel can see it, so its users are re-checked",
+      target := defAny, ownVisible := true, usersVisible := true
       apply := fun c => setTV c c.type ((value? c).map (.mdata {})) c.levelParams },
+    { title := "a `let` in a definition's body becomes `nondep`", target := defLet, ownVisible := true,
+      usersVisible := true
+      apply := fun c => setTV c c.type ((value? c).map flipNondep) c.levelParams },
     { title := "`max a b` becomes `max b a`", target := maxLevel, ownVisible := true, usersVisible := true
       apply := fun c => setTV c (swapMax c.type) none c.levelParams },
     { title := "a universe parameter is renamed: names are hashed as written, so its users are re-checked too",
@@ -288,5 +298,26 @@ unsafe def main : IO UInt32 := do
     let distinct := s.keys[`collideSame]? != s.keys[`collideOther]?
     unless distinct do failures := failures + 1
     IO.println s!"{if distinct then "ok  " else "FAIL"} two axioms with the same type: `a = a` and `a = b` get different keys"
+    -- An inductive block skips the kernel only if its stored recursors are exactly `generatedRecursors`, so that rule
+    -- must name the recursors Lean actually stores for every block, nested ones included.
+    let mut recursorsOf : Std.HashMap (List Name) (Array Name) := {}
+    for (n, c) in consts do
+      if let .recInfo v := c then recursorsOf := recursorsOf.insert v.all ((recursorsOf.getD v.all #[]).push n)
+    let mut blocks := 0
+    let mut nested := 0
+    let mut wrong : Array Name := #[]
+    for (n, c) in consts do
+      if let .inductInfo v := c then
+        if v.all.head? == some n then
+          blocks := blocks + 1
+          if v.numNested > 0 then nested := nested + 1
+          let stored := recursorsOf.getD v.all #[]
+          let gen := generatedRecursors v
+          unless stored.size == gen.length && gen.all stored.contains do wrong := wrong.push n
+    let named := wrong.isEmpty && nested > 0
+    unless named do failures := failures + 1
+    IO.println s!"{if named then "ok  " else "FAIL"} generated recursor names match the stored recursors of all \
+      {blocks} inductive blocks ({nested} nested)\
+      {if wrong.isEmpty then "" else s!"; wrong for {wrong.size}: {wrong.toList.take 3}"}"
     IO.println (if failures == 0 then "all key properties hold" else s!"{failures} failures")
     return if failures == 0 then 0 else 1

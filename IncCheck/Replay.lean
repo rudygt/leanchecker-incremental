@@ -11,6 +11,12 @@ The same replay as `Lean.Kernel.Environment.replay`, with one change in `addDecl
 opaque whose check key is in the verdict store is added with `addDeclWithoutChecking`. Every other declaration goes
 to the kernel as before. Inductive types and quotients always do: the kernel checks and generates them even on the
 unchecked path. Constructors and recursors are still compared with the ones the kernel generates.
+
+Check keys leave a theorem's proof out of the keys of its users. The kernel can still read a proof while checking a
+user: `Quot.lift` reduces its major premise with full `whnf`, and over a quotient in `Prop` that premise can be a theorem
+(`src/kernel/quot.h`). So the replay turns on the kernel's diagnostics, which record every constant whose value the
+kernel reads (`unfold_definition_core` in `src/kernel/type_checker.cpp`), and stores no verdict for a declaration or an
+inductive block whose check read a theorem. Those are checked again in every run.
 -/
 
 open Lean Kernel
@@ -58,6 +64,10 @@ structure State where
   accepted : Array ByteArray := #[]
   /-- Axioms, definitions, theorems and opaques the kernel checked in this run. -/
   checkedNames : Array Name := #[]
+  /-- Declarations and inductive blocks whose check read a theorem's proof, so their verdicts are not stored. -/
+  readProofs : Array Name := #[]
+  /-- Constants whose references, proofs included, a retry after a rejection has made present. -/
+  deepVisited : NameSet := {}
 
 abbrev M := ReaderT Context <| StateRefT State IO
 
@@ -72,27 +82,33 @@ def isTodo (name : Name) : M Bool := do
 def throwKernelException (ex : Kernel.Exception) : M Unit := do
   throw <| .userError <| (← ex.toMessageData {} |>.toString)
 
-/-- Add the declaration of `name`, skipping the kernel when the store holds its key. -/
-def addDecl (name : Name) (d : Declaration) : M Unit := do
-  let skippable := match d with
-    | .axiomDecl _ | .defnDecl _ | .thmDecl _ | .opaqueDecl _ => true
-    | _ => false
+/-- Whether the kernel read the value of a theorem since the diagnostics were last reset. The diagnostics name every
+constant the kernel unfolded, and some recursors and quotient constants it reduced; only theorems matter here. -/
+def readAProof (env : Kernel.Environment) : M Bool := do
   let ctx ← read
-  let key? := if skippable then ctx.keys[name]? else none
-  if key?.any ctx.store.contains then
-    match (← get).env.addDeclWithoutChecking d with
-    | .ok env => modify fun s => { s with env, skipped := s.skipped + 1 }
-    | .error ex => throwKernelException ex
-  else
-    match (← get).env.addDeclCore 0 0 d (cancelTk? := none) with
-    | .ok env =>
-      modify fun s => { s with
-        env, checked := s.checked + 1
-        checkedNames := if skippable then s.checkedNames.push name else s.checkedNames
-        accepted := match key? with
-          | some k => s.accepted.push k
-          | none => s.accepted }
-    | .error ex => throwKernelException ex
+  return env.getDiagnostics.unfoldCounter.toList.any fun (n, _) =>
+    (ctx.newConstants[n]? <|> env.find? n) matches some (.thmInfo _)
+
+/-- Send the declaration of `name` to the kernel. Everything with a stored verdict was inserted before the replay, the
+only place that skips the kernel. Returns whether the kernel read a theorem's proof while checking it, in which case no
+verdict for it may be stored. -/
+def addDecl (name : Name) (d : Declaration) : M Bool := do
+  let single := d matches .axiomDecl _ | .defnDecl _ | .thmDecl _ | .opaqueDecl _
+  let ctx ← read
+  let key? := if single then ctx.keys[name]? else none
+  match (← get).env.resetDiag.addDeclCore 0 0 d (cancelTk? := none) with
+  | .ok env =>
+    let sawProof ← readAProof env
+    modify fun s => { s with
+      env, checked := s.checked + 1
+      checkedNames := if single then s.checkedNames.push name else s.checkedNames
+      readProofs := if sawProof then s.readProofs.push name else s.readProofs
+      accepted := match key? with
+        | some k => if sawProof then s.accepted else s.accepted.push k
+        | none => s.accepted }
+    return sawProof
+  | .error ex => throwKernelException ex
+    return false
 
 /-- The constants a kernel check can reach through `ci` once `ci` is in the environment: its type, the body of a
 definition, and the structure of an inductive type, constructor or recursor. Not the proof of a theorem or the body of
@@ -107,7 +123,33 @@ def reachableThrough (ci : ConstantInfo) : NameSet :=
       (v.all.foldl (·.insert ·) s)
   | _ => s
 
+/-- Every constant `ci` names, a theorem's proof and an opaque body included. -/
+def allRefs (ci : ConstantInfo) : NameSet :=
+  match ci.value? (allowOpaque := true) with
+  | some v => v.getUsedConstantsAsSet.foldl (·.insert ·) (reachableThrough ci)
+  | none => reachableThrough ci
+
 mutual
+/-- Send `d` to the kernel. If it rejects, make present everything `name` can reach, proofs included, and try once
+more. The replay does not walk the proofs of constants already present, so a check that reads the proof of a theorem
+with a stored verdict (`readAProof`) can miss a constant that proof names. `--fresh` has all of them by then. -/
+partial def addChecked (name : Name) (d : Declaration) : M Bool := do
+  try addDecl name d
+  catch _ =>
+    replayDeep name
+    addDecl name d
+
+partial def replayDeep (name : Name) : M Unit := do
+  let mut stack := [name]
+  while !stack.isEmpty do
+    let n := stack.head!
+    stack := stack.tail
+    if (← get).deepVisited.contains n then continue
+    modify fun s => { s with deepVisited := s.deepVisited.insert n }
+    if (← get).remaining.contains n then replayConstant n
+    if let some ci := (← read).newConstants[n]? then
+      stack := (allRefs ci).foldl (fun st r => r :: st) stack
+
 partial def replayConstant (name : Name) : M Unit := do
   if !(← isTodo name) then
     -- Already in the environment: inserted with a stored verdict, or replayed earlier. A check that reaches it can
@@ -124,7 +166,7 @@ partial def replayConstant (name : Name) : M Unit := do
       try
         match ci with
         | .defnInfo   info =>
-          addDecl name (Declaration.defnDecl   info)
+          discard <| addChecked name (Declaration.defnDecl   info)
         | .thmInfo    info =>
           if let some (.thmInfo info') := (← get).env.find? ci.name then
             if info.name == info'.name &&
@@ -133,11 +175,11 @@ partial def replayConstant (name : Name) : M Unit := do
               info.all == info'.all
             then
               return
-          addDecl name (Declaration.thmDecl    info)
+          discard <| addChecked name (Declaration.thmDecl    info)
         | .axiomInfo  info =>
-          addDecl name (Declaration.axiomDecl  info)
+          discard <| addChecked name (Declaration.axiomDecl  info)
         | .opaqueInfo info =>
-          addDecl name (Declaration.opaqueDecl info)
+          discard <| addChecked name (Declaration.opaqueDecl info)
         | .inductInfo info =>
           let lparams := info.levelParams
           let nparams := info.numParams
@@ -164,23 +206,13 @@ partial def replayConstant (name : Name) : M Unit := do
             { name := val.name
               type := val.type
               ctors := ctors.map fun ci => { name := ci.name, type := ci.type } }
-          match (← read).blocks[name]? with
-          | some block =>
-            if (← read).store.contains block.key then
-              -- A complete earlier run of this kernel accepted a block with this exact content, and compared the
-              -- constructors and recursors it generated with these stored ones. Add them as an import would.
-              let mut added : Array ConstantInfo := all.toArray.map .inductInfo
-              for (_, ctors) in ctorInfo do added := added ++ ctors.toArray
-              for r in block.recursors do
-                if let some ci := (← read).newConstants[r]? then added := added.push ci
-              modify fun s => { s with
-                env := added.foldl kernelAdd s.env, skippedBlocks := s.skippedBlocks + 1 }
-            else
-              addDecl name (Declaration.inductDecl lparams nparams types false)
-              modify fun s => { s with accepted := s.accepted.push block.key, checkedBlocks := s.checkedBlocks.push name }
-          | none =>
-            addDecl name (Declaration.inductDecl lparams nparams types false)
-            modify fun s => { s with checkedBlocks := s.checkedBlocks.push name }
+          let sawProof ← addChecked name (Declaration.inductDecl lparams nparams types false)
+          let block? := (← read).blocks[name]?
+          modify fun s => { s with
+            accepted := match block? with
+              | some block => if sawProof then s.accepted else s.accepted.push block.key
+              | none => s.accepted
+            checkedBlocks := s.checkedBlocks.push name }
           -- The kernel computes the remaining fields (`numIndices`, `isRec`, ...) itself;
           -- the stored values must agree with them.
           for val in all do
@@ -192,7 +224,7 @@ partial def replayConstant (name : Name) : M Unit := do
           modify fun s => { s with postponedRecursors := s.postponedRecursors.insert info.name }
         | .quotInfo _ =>
           replayConstant `Eq
-          addDecl name (Declaration.quotDecl)
+          discard <| addDecl name (Declaration.quotDecl)
         modify fun s => { s with pending := s.pending.erase name }
       catch ex =>
         throw <| .userError s!"while replaying declaration '{name}':\n{ex}"
@@ -259,7 +291,7 @@ def replay (newConstants : Std.HashMap Name ConstantInfo) (keys : Std.HashMap Na
       remaining := members.foldl (fun r c => r.erase c.name) remaining
       skippedBlocks := skippedBlocks + 1
     | _ => pure ()
-  let (_, s) ← StateRefT'.run (s := { env, remaining, skipped, skippedBlocks }) do
+  let (_, s) ← StateRefT'.run (s := { env := env.enableDiag true, remaining, skipped, skippedBlocks }) do
     ReaderT.run (r := { newConstants, keys, store, blocks }) do
       replayConstant ``String.ofList
       replayConstant ``Char.ofNat

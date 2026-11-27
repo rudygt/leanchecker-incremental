@@ -16,3 +16,7 @@ path = "../.."
 # Built only by test/attacks.py: declarations that differ only in the names of the constants they refer to.
 [[lean_lib]]
 name = "Collide"
+
+# Built only by test/attacks.py, which writes QuotProof/Lib.lean: a check that reads a theorem's proof.
+[[lean_lib]]
+name = "QuotProof"

@@ -12,8 +12,11 @@ constants it refers to in other modules. So for each module the cache records:
   computed,
 * the declaration and interface id of each of its constants.
 
-A module is reused when its digest and the digest of those outside ids are unchanged. The cache is a trusted input,
-like the verdict store.
+A module is reused when its digest and the digest of those outside ids are unchanged, its entry names exactly the
+constants it owns now, and no other module declares one of them too. An import keeps one copy of a theorem that
+several modules declare, possibly with a different proof than the copy in the module it is attributed to, so the
+digest of that module does not cover the content the environment uses. The cache is a trusted input, like the
+verdict store.
 
 On disk, every name is stored once, as the index of its prefix and one component, and modules refer to names by index.
 An interface id is stored only when it differs from the declaration id.
@@ -62,7 +65,7 @@ partial def NameTable.intern (t : NameTable) (n : Name) : NameTable × Nat :=
     ({ index := t.index.insert n i, names := t.names.push n }, i)
 
 /-- Ties a cache file to the id rules of `keyScheme` and to this format. -/
-def magic : ByteArray := s!"{keyScheme} ids, format 2\n".toUTF8
+def magic : ByteArray := s!"{keyScheme} ids, format 3\n".toUTF8
 
 def encode (c : IdCache) : ByteArray := Id.run do
   let mut t : NameTable := {}
@@ -77,7 +80,7 @@ def encode (c : IdCache) : ByteArray := Id.run do
     | .str p s =>
       let bs := s.toUTF8
       b := pushU32 (pushU32 (b.push 0) (idx p)) bs.size ++ bs
-    | .num p k => b := pushU32 (pushU32 (b.push 1) (idx p)) k
+    | .num p k => b := pushNat (pushU32 (b.push 1) (idx p)) k
     | .anonymous => pure ()
   b := pushU32 b c.size
   for (mod, e) in c do
@@ -109,6 +112,11 @@ private def readFixed (bs : ByteArray) (n : Nat) : Reader ByteArray := do
   set (i + n)
   return bs.extract i (i + n)
 
+/-- A number written by `pushNat`: a length, then big-endian bytes. -/
+private def readNat (bs : ByteArray) : Reader Nat := do
+  let digits ← readFixed bs (← readU32 bs)
+  return digits.foldl (fun n d => n * 256 + d.toNat) 0
+
 def decode (bs : ByteArray) : Except String IdCache := do
   unless bs.extract 0 magic.size == magic do throw "not an id cache"
   let go : Reader IdCache := do
@@ -120,7 +128,7 @@ def decode (bs : ByteArray) : Except String IdCache := do
         let len ← readU32 bs
         names := names.push (.str p (String.fromUTF8! (← readFixed bs len)))
       else
-        names := names.push (.num p (← readU32 bs))
+        names := names.push (.num p (← readNat bs))
     let name (i : Nat) : Reader Name := do
       let some n := names[i]? | throw "bad name index in id cache"
       return n
@@ -204,10 +212,19 @@ def computeIdsCached (env : Environment) (old : IdCache) (threads : Nat := 1) : 
   let n := env.header.moduleNames.size
   let allDigests ← moduleDigests env.header.moduleNames threads
   let owner (c : Name) : Option Name := (env.getModuleIdxFor? c).map fun j => env.header.moduleNames[j.toNat]!
-  -- Per module: digest, owned constants, and the outside constants it refers to.
+  -- Names that more than one module declares. The environment keeps one copy, which need not come from the module
+  -- the name is attributed to.
+  let mut declared : NameSet := {}
+  let mut shared : NameSet := {}
+  for data in env.header.moduleData do
+    for c in data.constNames do
+      if declared.contains c then shared := shared.insert c else declared := declared.insert c
+  -- Per module: digest, owned constants, the outside constants it refers to, and its cache entry if that can be
+  -- trusted: same files, ids for exactly the constants it owns now, and none of them declared elsewhere too.
   let mut digests : Std.HashMap Name ByteArray := {}
   let mut owned : Std.HashMap Name (Array (Name × ConstantInfo)) := {}
   let mut ext : Std.HashMap Name (Array Name) := {}
+  let mut trusted : IdCache := {}
   for h : idx in [0:n] do
     let mod := env.header.moduleNames[idx]
     let digest := allDigests[idx]!
@@ -215,12 +232,11 @@ def computeIdsCached (env : Environment) (old : IdCache) (threads : Nat := 1) : 
     let names := env.header.moduleData[idx]!.constNames.filter fun c => owner c == some mod
     let infos := names.filterMap fun c => (env.find? c).map (c, ·)
     owned := owned.insert mod infos
-    match old[mod]? with
-    | some e =>
-      if e.digest == digest then
+    if let some e := old[mod]? then
+      if e.digest == digest && e.ids.map (·.1) == infos.map (·.1) && !infos.any (shared.contains ·.1) then
+        trusted := trusted.insert mod e
         ext := ext.insert mod e.extRefs
         continue
-    | none => pure ()
     let mut refs : NameSet := {}
     for (_, ci) in infos do
       for r in ownRefs ci do
@@ -238,16 +254,16 @@ def computeIdsCached (env : Environment) (old : IdCache) (threads : Nat := 1) : 
   for comp in comps do
     -- Outside references into another module of the same component resolve to that module's cached ids, which are
     -- valid if every module of the component is unchanged.
-    let compIds : Std.HashMap Name ByteArray := comp.foldl (init := {}) fun s m => match old[m]? with
+    let compIds : Std.HashMap Name ByteArray := comp.foldl (init := {}) fun s m => match trusted[m]? with
       | some e => e.ids.foldl (fun s (c, _, r) => s.insert c r) s
       | none => s
     let lookup (r : Name) : Option ByteArray := table[r]? <|> compIds[r]?
-    let reusable := comp.all fun m => match old[m]? with
-      | some e => e.digest == digests[m]! && extDigestOf lookup e.extRefs == some e.extDigest
+    let reusable := comp.all fun m => match trusted[m]? with
+      | some e => extDigestOf lookup e.extRefs == some e.extDigest
       | none => false
     if reusable then
       for m in comp do
-        let e := old[m]!
+        let e := trusted[m]!
         for (c, d, r) in e.ids do
           table := table.insert c r
           decls := decls.push (c, d)

@@ -4,6 +4,7 @@ Run from anywhere: `python3 test/scenarios.py [--id-cache]`. With `--id-cache` e
 `--id-cache`, so the scenarios cover the cached path. Every build and check runs under `nice -n 19`.
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -79,16 +80,20 @@ def main() -> None:
     print(out.splitlines()[0])
     assert code == 0 and len(names) > 60000, out
 
-    scenario("same build again: nothing is re-checked, inductive blocks included")
-    code, names, out = check()
-    assert code == 0 and names == set(), (names, out)
+    # A check that read a theorem's proof stores no verdict, so it runs every time (docs/soundness.md). Lean v4.37's
+    # kernel reads none in this project; v4.36's reads a few hundred, through recursors on proofs.
+    scenario("same build again: only checks that read a proof are re-checked, no inductive blocks")
+    code, always, out = check()
+    reported = re.search(r"([\d,]+) checks read a theorem's proof", out)
+    assert code == 0 and len(always) == (int(reported.group(1).replace(",", "")) if reported else 0), (always, out)
     assert "and 0 inductive blocks" in out, out
-    print("checked: none")
+    print(f"checked: {len(always)} that read a proof")
 
     scenario("proof edit that elaborates to the same term up to binder names: nothing is re-checked")
     edit(A, "unfold double; omega", "show n + n = 2 * n; omega")
     build()
     code, names, out = check()
+    names -= always
     print("checked:", sorted(names))
     assert code == 0 and names == set(), (names, out)
 
@@ -96,6 +101,7 @@ def main() -> None:
     edit(A, "show n + n = 2 * n; omega", "unfold double; exact (Nat.two_mul n).symm")
     build()
     code, names, out = check()
+    names -= always
     print("checked:", sorted(names))
     assert code == 0 and names == {"double_eq"}, (names, out)
 
@@ -104,6 +110,7 @@ def main() -> None:
     edit(A, "def double (n : Nat) : Nat := n + n", "def double (n : Nat) : Nat := 2 * n")
     build()
     code, names, out = check()
+    names -= always
     print("checked:", sorted(names))
     must = {"double", "double_eq", "Box.twice", "twice_val", "quadruple", "quadruple_eq"}
     assert code == 0 and must <= names, (must - names, out)

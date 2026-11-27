@@ -14,13 +14,20 @@ Every constant gets two SHA-256 ids:
   theorem's proof or the opaque body, and the interface ids of every constant those name.
 
 Expressions are hashed with constants referred to by name, so two constants with the same content but different names
-never share an id. Universe levels and parameters are hashed as written. Binder names, binder info and the `nondep`
-flag of `let` are left out, and `mdata` is skipped: the kernel reads none of them.
+never share an id. Universe levels and parameters are hashed as written. Binder names and binder info are left out: the
+kernel decides nothing by them. `mdata` and the `nondep` flag of `let` are hashed. The kernel does not look through an
+`mdata` node when it matches a term's shape, and it compares both, `mdata` contents included, when it merges nested
+occurrences of an inductive type (`src/kernel/inductive.cpp`, `src/kernel/expr_eq_fn.cpp`).
 
-References form cycles only inside an inductive block (its types, constructors and recursors) and inside a mutual
-group of definitions, and each of those is hashed as one unit. Any other cycle merges the units involved into one, and
-a reference without an interface id leaves the constant, and everything that refers to it, without ids. Those are
-always checked.
+Interface references form cycles only inside an inductive block (its types, constructors and recursors) and inside a
+mutual group of definitions, and each of those is hashed as one unit. Any other cycle merges the units involved into
+one, and a reference without an interface id leaves the constant, and everything that refers to it, without ids. Those
+are always checked.
+
+A key covers one declaration and the interfaces it names, not the proofs behind them. So the verdicts of separate runs
+could be combined into a cycle through proofs, such as `t1 := t2` and `t2 := t1`, which `leanchecker --fresh` rejects:
+it adds a constant only after everything it names. A constant on such a cycle gets no declaration id, and goes to the
+kernel.
 -/
 
 open Lean
@@ -57,6 +64,30 @@ def pushName (b : ByteArray) (n : Name) : ByteArray :=
 
 def pushNames (b : ByteArray) (ns : List Name) : ByteArray := ns.foldl pushName (pushU32 b ns.length)
 
+/-- Syntax as `Syntax.structEq` compares it, which is how the kernel compares `mdata` values: without source
+positions, and an identifier by its raw text, its name and its pre-resolved names. -/
+partial def pushSyntax (b : ByteArray) : Syntax → ByteArray
+  | .missing => b.push 0
+  | .node _ kind args => args.foldl pushSyntax (pushU32 (pushName (b.push 1) kind) args.size)
+  | .atom _ val => pushString (b.push 2) val
+  | .ident _ raw val pre =>
+    let b := pushName (pushString (b.push 3) raw.repair.toString) val
+    pre.foldl (init := pushU32 b pre.length) fun b p => match p with
+      | .namespace ns => pushName (b.push 0) ns
+      | .decl n fields => fields.foldl pushString (pushU32 (pushName (b.push 1) n) fields.length)
+
+def pushDataValue (b : ByteArray) : DataValue → ByteArray
+  | .ofString v => pushString (b.push 0) v
+  | .ofBool v => pushBool (b.push 1) v
+  | .ofName v => pushName (b.push 2) v
+  | .ofNat v => pushNat (b.push 3) v
+  | .ofInt v => pushNat (pushBool (b.push 4) (v < 0)) v.natAbs
+  | .ofSyntax v => pushSyntax (b.push 5) v
+
+/-- An `mdata` map, entries in order, as the kernel compares them. -/
+def pushKVMap (b : ByteArray) (m : KVMap) : ByteArray :=
+  m.entries.foldl (init := pushU32 b m.entries.length) fun b (k, v) => pushDataValue (pushName b k) v
+
 partial def pushLevel (b : ByteArray) : Level → ByteArray
   | .zero => b.push 0x20
   | .succ l => pushLevel (b.push 0x21) l
@@ -75,26 +106,24 @@ partial def pushExpr (b : ByteArray) : Expr → ByteArray
   | .app f a => pushExpr (pushExpr (b.push 0x06) f) a
   | .lam _ t body _ => pushExpr (pushExpr (b.push 0x07) t) body
   | .forallE _ t body _ => pushExpr (pushExpr (b.push 0x08) t) body
-  | .letE _ t v body _ => pushExpr (pushExpr (pushExpr (b.push 0x09) t) v) body
+  | .letE _ t v body nondep => pushExpr (pushExpr (pushExpr (pushBool (b.push 0x09) nondep) t) v) body
   | .lit (.natVal n) => pushNat (b.push 0x0A) n
   | .lit (.strVal s) => pushString (b.push 0x0B) s
-  | .mdata _ e => pushExpr b e
+  | .mdata d e => pushExpr (pushKVMap (b.push 0x0D) d) e
   | .proj s i e => pushExpr (pushNat (pushName (b.push 0x0C) s) i) e
 
 /-! ## Expressions -/
 
 /-- Digests of the large subterms seen so far. The key is compared with `Expr.eqv`, which ignores binder names and
-binder info, and so does the digest. -/
+binder info, as the digest does, and compares `mdata` and the `nondep` flag of `let`, as the digest does. -/
 abbrev HashM := StateM (Std.HashMap Expr ByteArray)
 
 /-- Subterms this shallow are hashed whole, in one SHA-256. Deeper ones are hashed from the digests of their children,
 with a memo, so that a proof term shared as a DAG costs its size as a DAG. -/
 def flatDepth : UInt32 := 8
 
-/-- The digest of a term. Whole-term digests start with `0xF0` and node digests with `0x86` to `0x8C`, so the two
-kinds never encode the same bytes. `mdata` is skipped, but not stripped first: rebuilding terms would break the pointer
-sharing that makes memo lookups cheap. An `mdata` node can still move a subterm across `flatDepth` and so change a
-digest, which only ever causes an extra check. `Expr.eqv` compares `mdata`, so the memo never mixes such terms. -/
+/-- The digest of a term. Whole-term digests start with `0xF0` and node digests with `0x86` to `0x8D`, so the two
+kinds never encode the same bytes. -/
 partial def digest (e : Expr) : HashM ByteArray := do
   if e.approxDepth ≤ flatDepth then
     return sha256Native (pushExpr (ByteArray.empty.push 0xF0) e)
@@ -107,9 +136,9 @@ partial def digest (e : Expr) : HashM ByteArray := do
     | .app f a => pure (node 0x86 [← digest f, ← digest a])
     | .lam _ t body _ => pure (node 0x87 [← digest t, ← digest body])
     | .forallE _ t body _ => pure (node 0x88 [← digest t, ← digest body])
-    | .letE _ t v body _ => pure (node 0x89 [← digest t, ← digest v, ← digest body])
+    | .letE _ t v body nondep => pure (node 0x89 [pushBool .empty nondep, ← digest t, ← digest v, ← digest body])
     | .proj s i inner => pure (node 0x8C [pushNat (pushName .empty s) i, ← digest inner])
-    | .mdata _ inner => digest inner
+    | .mdata d inner => pure (node 0x8D [pushKVMap .empty d, ← digest inner])
     | e => pure (sha256Native (pushExpr (ByteArray.empty.push 0xF0) e))
   modify (·.insert e d)
   return d
@@ -250,6 +279,39 @@ def sccs (nodes : Array Name) (succ : Name → Array Name) : Array (Array Name) 
           out := out.push comp
   return out
 
+/-- The constants of `infos` on a cycle of references, proofs and opaque bodies included, with an inductive block as
+one node. `--fresh` replays a constant only after the constants its type and value name, so it rejects every one of
+them. Constructors and recursors are left to the block: the kernel generates them. `unsafe` and `partial` constants
+are left out: neither checker replays them, so a safe constant that names one is rejected anyway. -/
+def onCycles (infos : Array (Name × ConstantInfo)) (find : Name → Option ConstantInfo) : NameSet := Id.run do
+  let infos := infos.filter fun (_, c) => !c.isUnsafe && !c.isPartial
+  let node (c : ConstantInfo) : Name := match c with
+    | .inductInfo _ | .ctorInfo _ | .recInfo _ => unitOf find c
+    | _ => c.name
+  let byName : Std.HashMap Name ConstantInfo := infos.foldl (fun m (n, c) => m.insert n c) {}
+  let mut members : Std.HashMap Name (Array Name) := {}
+  for (n, c) in infos do
+    members := members.insert (node c) ((members.getD (node c) #[]).push n)
+  let mut edges : Std.HashMap Name (Array Name) := {}
+  let mut selfLoops : NameSet := {}
+  for (n, c) in infos do
+    let u := node c
+    let refs := match c with
+      | .recInfo _ => ({} : NameSet)
+      | _ => c.getUsedConstantsAsSet
+    for r in refs do
+      if let some rc := byName[r]? then
+        let v := node rc
+        if v != u then edges := edges.insert u ((edges.getD u #[]).push v)
+        else if r == n && !(c matches .inductInfo _ | .ctorInfo _) then selfLoops := selfLoops.insert u
+  let nodes := members.keys.toArray.qsort (Name.cmp · · == .lt)
+  let mut out : NameSet := {}
+  for comp in sccs nodes (edges.getD · #[]) do
+    if comp.size > 1 || comp.any selfLoops.contains then
+      for u in comp do
+        out := (members.getD u #[]).foldl (·.insert ·) out
+  return out
+
 /-- The ids of one constant. -/
 structure Ids where
   interface : ByteArray
@@ -271,6 +333,7 @@ def hashGroup (infos : Array (Name × ConstantInfo)) (table : Std.HashMap Name B
   let succ (u : Name) : Array Name :=
     (unitRefs u).toArray.filterMap fun r => (unitOfName r).filter (· != u)
   let units := members.keys.toArray.qsort (Name.cmp · · == .lt)
+  let cyclic := onCycles infos find
   let mut table := table
   let mut ids : Std.HashMap Name Ids := {}
   let mut interface : Std.HashMap Name ByteArray := {}
@@ -301,6 +364,9 @@ def hashGroup (infos : Array (Name × ConstantInfo)) (table : Std.HashMap Name B
       inexact := inexact + names.size
   for (n, c) in infos do
     let some iface := interface[n]? | continue
+    if cyclic.contains n then
+      inexact := inexact + 1
+      continue
     let (extra, memo') := (ownContent c).run memo
     memo := memo'
     let iRefs := interfaceRefs c

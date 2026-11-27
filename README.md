@@ -63,6 +63,7 @@ rejects something, and 2 for usage errors.
 | `--id-cache FILE` | Use `FILE` as the id cache instead of `.lake/leanchecker-inc/ids.bin`. |
 | `--no-id-cache` | Hash every declaration again. The keys are the same as with the cache. |
 | `-j N`, `--threads N` | Read and hash `.olean` files with `N` threads (default: all hardware threads). |
+| `--shard I/N` | Check only the modules whose import index is `I` mod `N`, and assume the verdicts of the rest. Run all `N` shards, possibly on different machines, then one run without `--shard` with their stores concatenated: the project is checked when that run accepts. |
 | `-q`, `--quiet` | Print only the result. |
 | `--log-checked FILE` | Write the names of the declarations the kernel checked, and `inductive T` for each inductive block. |
 | `--dump-keys FILE` | Write every check key as `name hex` lines. |
@@ -106,25 +107,31 @@ jobs:
 
 ## What it guarantees
 
-If the verdict store and the id cache were written only by this tool, `leanchecker-inc` accepts a project only if
-replaying every declaration with Lean's kernel would accept it. It is never weaker than `leanchecker --fresh` with the
-same kernel. On two shapes of forged `.olean` that Lean fixed after `v4.37.0-rc1` it is stricter, because it carries
-those fixes. It is not stronger in any other way. Like `leanchecker`, it trusts that Lean's prelude is Lean's
-prelude, so for adversarial settings use `lake comparator` or an external checker.
+If the verdict store and the id cache were written only by this tool, and the `.olean` files do not change during a run,
+`leanchecker-inc` accepts a project only if replaying every declaration with Lean's kernel would accept it, given the
+stack and memory of the runs that recorded the verdicts it reuses. It is never weaker than `leanchecker --fresh` with
+the same kernel. On two shapes of forged `.olean` that Lean fixed after `v4.37.0-rc1` it is stricter, because it carries
+those fixes. It is not stronger in any other way. Like `leanchecker`, it trusts that Lean's prelude is Lean's prelude,
+so for adversarial settings use `lake comparator` or an external checker.
 
 A declaration skips the kernel when its check key is in the store. The key is a SHA-256 over everything the kernel
 reads while checking it: the declaration, the names and statements of the theorems it uses, the names and full
 content of the other constants it uses (definitions with their bodies and reducibility hints, inductive types with
-their constructors and recursors), the constants the kernel uses by name, and the Lean commit. So a changed proof re-checks only its own
-theorem, and a changed definition re-checks everything that can see its body.
+their constructors and recursors), the constants the kernel uses by name, the Lean commit, and `LEAN_NAT_MAX_SIZE`. So
+a changed proof re-checks only its own theorem, and a changed definition re-checks everything that can see its body.
+The kernel can read a proof in rare cases, such as `Quot.lift` over a quotient in `Prop`. The check records what the
+kernel reads, and stores no verdict for a declaration whose check read a proof, so that declaration is checked in
+every run.
 
 The store and the id cache are trusted inputs. Keep them where only this tool writes, and run with `--no-store` from
 time to time. `docs/soundness.md` gives the full argument, what it rests on, and the tests behind it.
 
 Versions up to commit `e177201` (key schemes 1 and 2) left the names of referenced constants out of the keys. Those
 versions accepted a proof of `a = b` for two axioms `a b : Nat` when the store held the verdict of a proof of `a = a`.
-Key scheme 3 fixes it. Stores and id caches written by older versions are ignored, because every key and the cache
-header include the key scheme.
+Key scheme 3 fixes it. An audit on 2026-11-27 found ten more ways to accept what `leanchecker --fresh` rejects, through
+forged `.olean` files, a stale `.olean` after a proof change, verdicts of separate runs combined into a proof cycle, or
+the id cache. Key scheme 5 and id cache format 3 fix them, and `docs/soundness.md` lists them with their tests. Stores
+and id caches written by older versions are ignored, because every key and the cache header include the key scheme.
 
 ## Limitations
 
